@@ -1041,16 +1041,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-worker: python bot.py
 
-[tool.poetry]
-name = "monitor-bot"
-version = "1.0.0"
-description = "Telegram бот для Моніторинг Виробництва + ІТР"
-
-[tool.poetry.dependencies]
-python = "^3.11"
-python-telegram-bot = "20.7"
-firebase-admin = "6.4.0"
-anthropic = "0.23.0"
-Pillow = "10.2.0"
