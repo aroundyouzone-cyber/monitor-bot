@@ -24,7 +24,7 @@ from firebase_admin import credentials, firestore
 
 # ── Anthropic для розпізнавання чеків ────────────────────────
 try:
-    import anthropic
+    import google.generativeai as genai
     CLAUDE_AVAILABLE = True
 except ImportError:
     CLAUDE_AVAILABLE = False
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ── КОНФІГУРАЦІЯ (задається через змінні середовища) ─────────
 BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
 FIREBASE_KEY = os.environ.get('FIREBASE_KEY', '')   # JSON рядок з ключем Firebase
-CLAUDE_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
+CLAUDE_KEY   = os.environ.get('GEMINI_API_KEY', '')
 
 # ── СТАНИ РОЗМОВИ ─────────────────────────────────────────────
 (
@@ -643,24 +643,10 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 img_b64 = base64.standard_b64encode(img_bytes).decode()
 
                 # Ask Claude to parse receipt
-                client = anthropic.Anthropic(api_key=CLAUDE_KEY)
-                response = client.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=1000,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/jpeg",
-                                    "data": img_b64
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": """Розпізнай цей чек або накладну. Поверни JSON у форматі:
+                             genai.configure(api_key=CLAUDE_KEY)
+                model = genai.GenerativeModel("gemini-2.0-flash")
+                response = model.generate_content([
+                    """Розпізнай цей чек або накладну. Поверни JSON у форматі:
 {
   "supplier": "назва магазину/постачальника",
   "date": "дата YYYY-MM-DD або null",
@@ -669,14 +655,12 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     {"name": "назва товару", "qty": 2, "unit": "шт", "price": 150.0, "amount": 300.0}
   ]
 }
-Якщо не можеш розпізнати — поверни {"error": "причина"}
-Відповідай ТІЛЬКИ JSON без пояснень."""
-                            }
-                        ]
-                    }]
-                )
+Якщо не можеш розпізнати – поверни {"error": "причина"}
+Відповідай ТІЛЬКИ JSON без пояснень.""",
+                    {"mime_type": "image/jpeg", "data": img_bytes}
+                ])
 
-                result_text = response.content[0].text.strip()
+                result_text = response.text.strip()
                 # Clean JSON
                 if '```' in result_text:
                     result_text = result_text.split('```')[1]
