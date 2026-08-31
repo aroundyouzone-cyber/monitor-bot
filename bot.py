@@ -643,7 +643,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 img_b64 = base64.standard_b64encode(img_bytes).decode()
 
                 # Ask Claude to parse receipt
-                             genai.configure(api_key=CLAUDE_KEY)
+                genai.configure(api_key=CLAUDE_KEY)
                 model = genai.GenerativeModel("gemini-2.0-flash")
                 response = model.generate_content([
                     """Розпізнай цей чек або накладну. Поверни JSON у форматі:
