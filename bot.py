@@ -868,12 +868,12 @@ async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if low:
         text += "🔴 *Мало / Потрібно замовити:*\n"
         for s in low[:8]:
-            text += f"  ⚠️ {s['name']} — {s.get('qty',0)} {s.get('unit','шт')}\n"
+           text += f"⚠️ {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
 
     if ok:
         text += "\n✅ *В нормі (перші 8):*\n"
         for s in ok[:8]:
-            text += f"  • {s['name']} — {s.get('qty',0)} {s.get('unit','шт')}\n"
+            text += f"• {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
 
     if len(stocks) > 16:
         text += f"\n_...ще {len(stocks)-16} позицій у веб-програмі_"
