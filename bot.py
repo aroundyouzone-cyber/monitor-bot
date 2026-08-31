@@ -1012,7 +1012,7 @@ def main():
         fallbacks=[
             CommandHandler('cancel', cancel),
             CommandHandler('start', start),
-        ],
+        MessageHandler(filters.TEXT & ~filters.COMMAND, start),],
     )
 
     app.add_handler(conv_handler)
