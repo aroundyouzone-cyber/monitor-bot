@@ -365,8 +365,34 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 await update.message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
                 return DAILY_WORKERS
+                    if awaiting == 'material_stock_qty':
+        try:
+            qty = float(text.replace(',', '.'))
+            mat = context.user_data.get('pending_material', {})
+            available = mat.get('available', 0)
+            new_qty = available - qty
+            context.user_data['daily']['materials'].append({
+                'name': mat.get('name',''),
+                'qty': qty,
+                'unit': mat.get('unit','шт'),
+                'price': mat.get('price', 0),
+                'sku': ''
+            })
+            stock_data = dict(mat.get('stock_data', {}))
+            if mat.get('stock_id') and stock_data:
+                stock_data['qty'] = new_qty
+                fb_set('matStock', mat['stock_id'], stock_data)
+            context.user_data.pop('pending_material', None)
+            context.user_data.pop('awaiting', None)
+            warn = "\n⚠️ Залишок став від'ємним!" if new_qty < 0 else ""
+            await update.message.reply_text(f"✅ Списано {qty} {mat.get('unit','шт')}. Залишок: {new_qty}{warn}")
+            return await ask_materials_msg(update, context)
+        except:
+            await update.message.reply_text("❌ Введіть число, наприклад: 10")
+            return DAILY_MATERIALS
 
     if awaiting == 'material_name':
+   
         context.user_data['pending_material'] = {'name': text}
         await update.message.reply_text(
             f"📦 *{text}*\n\nВведіть кількість та одиницю (наприклад: 50 м або 10 шт):",
@@ -515,10 +541,41 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if context.user_data['daily']['materials']:
             context.user_data['daily']['materials'].pop()
         return await ask_materials_msg(update, context, via_callback=True)
-    if data == 'mat_add':
+            if data == 'mat_add':
+        stocks = fb_get_all('matStock')
+        buttons = []
+        for s in stocks:
+            buttons.append([InlineKeyboardButton(
+                f"📦 {s.get('name','')} ({s.get('qty',0)} {s.get('unit','шт')})",
+                callback_data=f"matsel_{s['id']}"
+            )])
+        buttons.append([InlineKeyboardButton("✏️ Немає в списку — вручну", callback_data="mat_manual")])
+        await query.edit_message_text("📦 Оберіть матеріал зі складу:", reply_markup=InlineKeyboardMarkup(buttons))
+        return DAILY_MATERIALS
+    if data == 'mat_manual':
         await query.edit_message_text("📦 Введіть назву матеріалу:")
         context.user_data['awaiting'] = 'material_name'
         return DAILY_MATERIALS
+    if data.startswith('matsel_'):
+        stock_id = data.replace('matsel_', '')
+        stocks = fb_get_all('matStock')
+        stock = next((s for s in stocks if s['id'] == stock_id), None)
+        if not stock:
+            return await ask_materials_msg(update, context, via_callback=True)
+        context.user_data['pending_material'] = {
+            'name': stock.get('name',''),
+            'unit': stock.get('unit','шт'),
+            'price': stock.get('price', 0),
+            'stock_id': stock_id,
+            'available': stock.get('qty', 0),
+            'stock_data': stock
+        }
+        await query.edit_message_text(
+            f"📦 *{stock.get('name','')}*\nНаявно: {stock.get('qty',0)} {stock.get('unit','шт')}\n\nВведіть кількість, яку використали:",
+            parse_mode='Markdown'
+        )
+        context.user_data['awaiting'] = 'material_stock_qty'
+        return DAILY_MATERIALS   
     return DAILY_MATERIALS
 
 async def ask_transport(update: Update, context: ContextTypes.DEFAULT_TYPE):
