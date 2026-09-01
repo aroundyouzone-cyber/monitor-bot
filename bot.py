@@ -407,15 +407,38 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❌ Введіть число (ціну)")
             return DAILY_MATERIALS
 
-    if awaiting == 'transport_input':
-        parts = text.split()
-        name = ' '.join(p for p in parts if not p.replace('.','').isdigit()) or 'Транспорт'
-        nums = [float(p) for p in parts if p.replace('.','').isdigit()]
-        cost = nums[0] if nums else 0
-        km = nums[1] if len(nums) > 1 else 0
-        context.user_data['daily']['transport'].append({'name': name, 'cost': cost, 'km': km, 'hrs': 0})
-        context.user_data.pop('awaiting', None)
-        return await ask_transport_msg(update, context)
+       if awaiting == 'transport_name':
+        context.user_data['pending_transport'] = {'name': text}
+        await update.message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):")
+        context.user_data['awaiting'] = 'transport_qty'
+        return DAILY_TRANSPORT
+
+    if awaiting == 'transport_qty':
+        try:
+            qty = float(text.replace(',', '.'))
+            tr = context.user_data.get('pending_transport', {})
+            tr['qty'] = qty
+            context.user_data['pending_transport'] = tr
+            await update.message.reply_text("💰 Ціна за одиницю (₴/км або ₴/год), введіть 0 якщо невідома:")
+            context.user_data['awaiting'] = 'transport_price'
+            return DAILY_TRANSPORT
+        except:
+            await update.message.reply_text("❌ Введіть число, наприклад: 120")
+            return DAILY_TRANSPORT
+
+    if awaiting == 'transport_price':
+        try:
+            price = float(text.replace(',', '.').replace(' ', ''))
+            tr = context.user_data.get('pending_transport', {})
+            tr['price'] = price
+            tr['cost'] = tr.get('qty', 0) * price
+            context.user_data['daily']['transport'].append(tr)
+            context.user_data.pop('pending_transport', None)
+            context.user_data.pop('awaiting', None)
+            return await ask_transport_msg(update, context)
+        except:
+            await update.message.reply_text("❌ Введіть число (ціну)")
+            return DAILY_TRANSPORT
 
     if awaiting == 'daily_desc':
         context.user_data['daily']['desc'] = text
