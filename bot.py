@@ -537,13 +537,10 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DAILY_DESC
     if data == 'tr_save':
         return await confirm_daily(update, context)
-    if data == 'tr_add':
-        await query.edit_message_text(
-            "🚛 Введіть транспорт у форматі:\n`Газель 850` (назва вартість)\nАбо: `Газель 850 120` (назва вартість км)"
-        )
-        context.user_data['awaiting'] = 'transport_input'
+        if data == 'tr_add':
+        await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):")
+        context.user_data['awaiting'] = 'transport_name'
         return DAILY_TRANSPORT
-    return DAILY_TRANSPORT
 
 async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     daily = context.user_data['daily']
