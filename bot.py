@@ -596,7 +596,7 @@ async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if daily['transport']:
         text += "\n🚛 *Транспорт:*\n"
         for t in daily['transport']:
-                        if t.get('qty'):
+            if t.get('qty'):
                 text += f"  • {t['name']} — {t['qty']} x {fmt_money(t.get('price',0))} = {fmt_money(t.get('cost',0))}\n"
             else:
                 text += f"  • {t['name']} — {fmt_money(t.get('cost',0))}\n"
