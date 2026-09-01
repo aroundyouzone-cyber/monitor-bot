@@ -406,8 +406,8 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             await update.message.reply_text("❌ Введіть число (ціну)")
             return DAILY_MATERIALS
-
-       if awaiting == 'transport_name':
+            
+    if awaiting == 'transport_name':
         context.user_data['pending_transport'] = {'name': text}
         await update.message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):")
         context.user_data['awaiting'] = 'transport_qty'
