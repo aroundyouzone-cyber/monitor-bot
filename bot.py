@@ -366,7 +366,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await update.message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
                 return DAILY_WORKERS
                     if awaiting == 'material_stock_qty':
-        try:
+    try:
             qty = float(text.replace(',', '.'))
             mat = context.user_data.get('pending_material', {})
             available = mat.get('available', 0)
@@ -541,7 +541,7 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if context.user_data['daily']['materials']:
             context.user_data['daily']['materials'].pop()
         return await ask_materials_msg(update, context, via_callback=True)
-            if data == 'mat_add':
+        if data == 'mat_add':
         stocks = fb_get_all('matStock')
         buttons = []
         for s in stocks:
