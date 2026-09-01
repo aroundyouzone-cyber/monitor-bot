@@ -336,8 +336,8 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             await update.message.reply_text("❌ Введіть число, наприклад: 8 або 7.5")
             return DAILY_WORKERS
-
-           if awaiting == 'worker_manual':
+            
+    if awaiting == 'worker_manual':
             raw_entries = text.replace('\n', ',').split(',')
             entries = [e.strip() for e in raw_entries if e.strip()]
             added = 0
