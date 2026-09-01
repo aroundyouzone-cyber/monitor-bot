@@ -337,19 +337,34 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❌ Введіть число, наприклад: 8 або 7.5")
             return DAILY_WORKERS
 
-    if awaiting == 'worker_manual':
-        parts = text.split()
-        try:
-            name = ' '.join(p for p in parts if not p.replace('.','').isdigit())
-            nums = [float(p) for p in parts if p.replace('.','').isdigit()]
-            hrs = nums[0] if nums else 8
-            rate = nums[1] if len(nums) > 1 else 0
-            context.user_data['daily']['workers'].append({'name': name, 'spec': '', 'hrs': hrs, 'rate': rate})
+           if awaiting == 'worker_manual':
+            raw_entries = text.replace('\n', ',').split(',')
+            entries = [e.strip() for e in raw_entries if e.strip()]
+            added = 0
+            failed = []
+            for entry in entries:
+                parts = entry.split()
+                nums_idx = [i for i, p in enumerate(parts) if p.replace('.','').isdigit()]
+                if not nums_idx:
+                    failed.append(entry)
+                    continue
+                name = ' '.join(p for i, p in enumerate(parts) if i not in nums_idx)
+                nums = [float(parts[i]) for i in nums_idx]
+                hrs = nums[0] if nums else 8
+                rate = nums[1] if len(nums) > 1 else 0
+                if name:
+                    context.user_data['daily']['workers'].append({'name': name, 'spec': '', 'hrs': hrs, 'rate': rate})
+                    added += 1
+                else:
+                    failed.append(entry)
             context.user_data.pop('awaiting', None)
-            return await ask_workers_msg(update, context)
-        except:
-            await update.message.reply_text("❌ Формат: Петренко І.І. 8 (або Петренко 8 280)")
-            return DAILY_WORKERS
+            if failed:
+                await update.message.reply_text(f"⚠️ Не розпізнано: {', '.join(failed)}")
+            if added:
+                return await ask_workers_msg(update, context)
+            else:
+                await update.message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
+                return DAILY_WORKERS
 
     if awaiting == 'material_name':
         context.user_data['pending_material'] = {'name': text}
