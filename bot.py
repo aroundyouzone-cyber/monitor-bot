@@ -365,7 +365,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 await update.message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
                 return DAILY_WORKERS
-                    if awaiting == 'material_stock_qty':
+            if awaiting == 'material_stock_qty':
     try:
             qty = float(text.replace(',', '.'))
             mat = context.user_data.get('pending_material', {})
