@@ -558,7 +558,7 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("📝 Коротко опишіть що зробили за день (або натисніть /skip):")
         context.user_data['awaiting'] = 'daily_desc'
         return DAILY_DESC
-       if data == 'tr_save':
+    if data == 'tr_save':
         return await confirm_daily(update, context)
     if data == 'tr_add':
         await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):")
