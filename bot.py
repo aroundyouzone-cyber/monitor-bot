@@ -541,7 +541,7 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if context.user_data['daily']['materials']:
             context.user_data['daily']['materials'].pop()
         return await ask_materials_msg(update, context, via_callback=True)
-        if data == 'mat_add':
+    if data == 'mat_add':
         stocks = fb_get_all('matStock')
         buttons = []
         for s in stocks:
