@@ -8,7 +8,7 @@ import os
 import json
 import logging
 import base64
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, time as dtime
 from io import BytesIO
 
 from telegram import (
@@ -37,6 +37,21 @@ BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
 FIREBASE_KEY = os.environ.get('FIREBASE_KEY', '')   # JSON рядок з ключем Firebase
 CLAUDE_KEY   = os.environ.get('GEMINI_API_KEY', '')
 
+# ── ДОСТУП (задається через змінні середовища) ────────────────
+# ALLOWED_USER_IDS: через кому, напр. "123456789,987654321"
+# OWNER_ID: власник (може видаляти записи). Якщо не задано — перший з ALLOWED_USER_IDS
+ALLOWED_IDS = [i.strip() for i in os.environ.get('ALLOWED_USER_IDS', '').split(',') if i.strip()]
+OWNER_ID    = os.environ.get('OWNER_ID', '') or (ALLOWED_IDS[0] if ALLOWED_IDS else '')
+
+def is_allowed(user_id):
+    """Якщо ALLOWED_USER_IDS не задано — доступ відкритий (для першого налаштування)"""
+    if not ALLOWED_IDS:
+        return True
+    return str(user_id) in ALLOWED_IDS
+
+def is_owner(user_id):
+    return bool(OWNER_ID) and str(user_id) == str(OWNER_ID)
+
 # ── СТАНИ РОЗМОВИ ─────────────────────────────────────────────
 (
     MAIN_MENU,
@@ -44,7 +59,8 @@ CLAUDE_KEY   = os.environ.get('GEMINI_API_KEY', '')
     DAILY_WORKERS, DAILY_MATERIALS, DAILY_TRANSPORT, DAILY_DESC, DAILY_CONFIRM,
     RECEIPT_PHOTO, RECEIPT_CONFIRM, RECEIPT_TARGET,
     STOCK_ACTION, STOCK_NAME, STOCK_QTY,
-) = range(14)
+    HISTORY_LIST,
+) = range(15)
 
 # ── FIREBASE ──────────────────────────────────────────────────
 db = None
@@ -96,6 +112,16 @@ def fb_add(collection, data):
         logger.error(f"Firebase add error: {e}")
         return None
 
+def fb_delete(collection, doc_id):
+    """Видалити документ"""
+    if not db: return False
+    try:
+        db.collection(collection).document(doc_id).delete()
+        return True
+    except Exception as e:
+        logger.error(f"Firebase delete error: {e}")
+        return False
+
 # ── ДОПОМІЖНІ ФУНКЦІЇ ─────────────────────────────────────────
 def today_str():
     return date.today().isoformat()
@@ -123,12 +149,20 @@ def main_keyboard():
     return ReplyKeyboardMarkup([
         ['📅 Щоденний звіт', '🧾 Фото чека/накладної'],
         ['📦 Склад', '📊 Звіт по об\'єкту'],
-        ['🏗️ Об\'єкти', '❓ Допомога'],
+        ['🏗️ Об\'єкти', '📜 Мої записи'],
+        ['❓ Допомога'],
     ], resize_keyboard=True)
 
 # ── КОМАНДА /start ────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_allowed(uid):
+        await update.message.reply_text("⛔ У вас немає доступу до цього бота.\nЗверніться до адміністратора.")
+        return ConversationHandler.END
+
     name = update.effective_user.first_name
+    if is_owner(uid):
+        fb_set('settings', 'admin', {'chat_id': update.effective_chat.id})
     await update.message.reply_text(
         f"👋 Привіт, {name}!\n\n"
         f"🏗️ *Моніторинг виробництва + ІТР*\n\n"
@@ -157,6 +191,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_report(update, context)
     elif text == '🏗️ Об\'єкти':
         return await show_objects(update, context)
+    elif text == '📜 Мої записи':
+        return await show_history(update, context)
     elif text == '❓ Допомога':
         await show_help(update, context)
         return MAIN_MENU
@@ -175,17 +211,55 @@ async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return MAIN_MENU
 
+    buttons = [
+        [InlineKeyboardButton("📅 Сьогодні", callback_data="date_today"),
+         InlineKeyboardButton("📆 Вчора", callback_data="date_yesterday")],
+        [InlineKeyboardButton("✏️ Інша дата", callback_data="date_custom")],
+    ]
+    await update.message.reply_text(
+        "🗓 За яку дату вносимо звіт?",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return SELECT_DATE
+
+async def date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == 'date_today':
+        return await show_object_buttons(update, context, today_str(), via_callback=True)
+    if data == 'date_yesterday':
+        yst = (date.today() - timedelta(days=1)).isoformat()
+        return await show_object_buttons(update, context, yst, via_callback=True)
+    if data == 'date_custom':
+        await query.edit_message_text("✏️ Введіть дату у форматі ДД.ММ.РРРР (наприклад: 28.08.2026):")
+        context.user_data['awaiting'] = 'custom_date'
+        return SELECT_DATE
+    return SELECT_DATE
+
+async def show_object_buttons(update, context, chosen_date, via_callback=False):
+    objects = get_objects()
+    active = [o for o in objects if o.get('status') == 'active']
+    if not active:
+        msg = "⚠️ Немає активних об'єктів.\nСпочатку додайте об'єкт у веб-програмі."
+        if via_callback and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
+        else:
+            await update.message.reply_text(msg, reply_markup=main_keyboard())
+        return MAIN_MENU
+
     context.user_data['daily'] = {
-        'date': today_str(),
+        'date': chosen_date,
         'workers': [], 'materials': [], 'transport': [], 'desc': ''
     }
 
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"obj_{o['id']}")] for o in active]
-    await update.message.reply_text(
-        f"📅 *Щоденний звіт*\nДата: {fmt_date(today_str())}\n\nОберіть об'єкт:",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    text = f"📅 *Щоденний звіт*\nДата: {fmt_date(chosen_date)}\n\nОберіть об'єкт:"
+    if via_callback and update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     return SELECT_OBJECT
 
 async def select_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -319,6 +393,19 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Handle text input during daily log creation"""
     text = update.message.text.strip()
     awaiting = context.user_data.get('awaiting', '')
+
+    if awaiting == 'custom_date':
+        try:
+            parts = text.replace('/', '.').replace('-', '.').split('.')
+            if len(parts) != 3:
+                raise ValueError
+            d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+            chosen_date = date(y, m, d).isoformat()
+            context.user_data.pop('awaiting', None)
+            return await show_object_buttons(update, context, chosen_date, via_callback=False)
+        except:
+            await update.message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
+            return SELECT_DATE
 
     if awaiting == 'worker_hrs_input':
         try:
@@ -471,10 +558,17 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop('awaiting', None)
         return await confirm_daily(update, context)
 
+    phase = context.user_data.get('daily_phase', 'workers')
+    await update.message.reply_text("⚠️ Скористайтесь кнопками вище, або натисніть відповідну кнопку зі списку.")
+    if phase == 'materials':
+        return DAILY_MATERIALS
+    if phase == 'transport':
+        return DAILY_TRANSPORT
     return DAILY_WORKERS
 
-async def ask_workers_msg(update, context):
+async def ask_workers_msg(update, context, via_callback=False):
     """Show workers screen via message (not callback)"""
+    context.user_data['daily_phase'] = 'workers'
     workers = get_workers()
     context.user_data['workers_list'] = workers
     daily = context.user_data['daily']
@@ -492,13 +586,17 @@ async def ask_workers_msg(update, context):
             buttons.append([InlineKeyboardButton(f"👷 {w['name']}", callback_data=f"wrk_{w['id']}")])
     buttons.append([InlineKeyboardButton("✅ Далі — Матеріали", callback_data="wrk_done")])
 
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    if via_callback and update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     return DAILY_WORKERS
 
 async def ask_materials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_materials_msg(update, context, via_callback=True)
 
 async def ask_materials_msg(update, context, via_callback=False):
+    context.user_data['daily_phase'] = 'materials'
     daily = context.user_data['daily']
     added = daily['materials']
 
@@ -518,6 +616,7 @@ async def ask_materials_msg(update, context, via_callback=False):
     ]
     if added:
         buttons.append([InlineKeyboardButton("🔙 Видалити останній", callback_data="mat_undo")])
+    buttons.append([InlineKeyboardButton("↩️ Назад до робітників", callback_data="mat_back")])
 
     msg = text
     if via_callback and update.callback_query:
@@ -537,6 +636,8 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await ask_transport(update, context)
     if data == 'mat_skip_tr':
         return await confirm_daily(update, context)
+    if data == 'mat_back':
+        return await ask_workers_msg(update, context, via_callback=True)
     if data == 'mat_undo':
         if context.user_data['daily']['materials']:
             context.user_data['daily']['materials'].pop()
@@ -582,6 +683,7 @@ async def ask_transport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_transport_msg(update, context, via_callback=True)
 
 async def ask_transport_msg(update, context, via_callback=False):
+    context.user_data['daily_phase'] = 'transport'
     daily = context.user_data['daily']
     added = daily['transport']
 
@@ -595,6 +697,7 @@ async def ask_transport_msg(update, context, via_callback=False):
         [InlineKeyboardButton("➕ Додати транспорт", callback_data="tr_add")],
         [InlineKeyboardButton("✅ Далі — Опис", callback_data="tr_done")],
         [InlineKeyboardButton("⏭ Без опису — Зберегти", callback_data="tr_save")],
+        [InlineKeyboardButton("↩️ Назад до матеріалів", callback_data="tr_back")],
     ]
 
     msg = text
@@ -617,6 +720,8 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DAILY_DESC
     if data == 'tr_save':
         return await confirm_daily(update, context)
+    if data == 'tr_back':
+        return await ask_materials_msg(update, context, via_callback=True)
     if data == 'tr_add':
         await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):")
         context.user_data['awaiting'] = 'transport_name'
@@ -667,6 +772,7 @@ async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("✅ Зберегти", callback_data="daily_save"),
          InlineKeyboardButton("❌ Скасувати", callback_data="daily_cancel")],
+        [InlineKeyboardButton("↩️ Назад до транспорту", callback_data="daily_back")],
     ]
 
     if update.callback_query:
@@ -686,8 +792,13 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
+    if query.data == 'daily_back':
+        return await ask_transport_msg(update, context, via_callback=True)
+
     if query.data == 'daily_save':
         daily = context.user_data['daily']
+        daily['submittedBy'] = update.effective_user.first_name or update.effective_user.username or 'Невідомо'
+        daily['submittedById'] = update.effective_user.id
         doc_id = fb_add('dailyLogs', daily)
 
         if doc_id:
@@ -962,16 +1073,41 @@ async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if low:
         text += "🔴 *Мало / Потрібно замовити:*\n"
-        for s in low[:8]:
+        for s in low[:20]:
            text += f"⚠️ {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
 
     if ok:
-        text += "\n✅ *В нормі (перші 8):*\n"
-        for s in ok[:8]:
+        text += "\n✅ *В нормі:*\n"
+        for s in ok[:20]:
             text += f"• {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
 
-    if len(stocks) > 16:
-        text += f"\n_...ще {len(stocks)-16} позицій у веб-програмі_"
+    if len(stocks) > 40:
+        text += f"\n_...ще {len(stocks)-40} позицій, скористайтесь пошуком або веб-програмою_"
+
+    buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")]]
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    return STOCK_ACTION
+
+async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'stock_search':
+        await query.edit_message_text("🔍 Введіть частину назви матеріалу:")
+        return STOCK_NAME
+    return MAIN_MENU
+
+async def stock_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.message.text.strip().lower()
+    stocks = fb_get_all('matStock')
+    found = [s for s in stocks if q in s.get('name','').lower()]
+
+    if not found:
+        await update.message.reply_text(f"❌ Нічого не знайдено за «{update.message.text}»", reply_markup=main_keyboard())
+        return MAIN_MENU
+
+    text = f"🔍 *Знайдено ({len(found)}):*\n\n"
+    for s in found[:20]:
+        text += f"• {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
 
     await update.message.reply_text(text, parse_mode='Markdown', reply_markup=main_keyboard())
     return MAIN_MENU
@@ -1023,6 +1159,98 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
     return MAIN_MENU
 
+# ── МОЇ ЗАПИСИ (ІСТОРІЯ) ──────────────────────────────────────
+def _log_total(l):
+    total_wage = sum(w.get('hrs',0)*w.get('rate',0) for w in l.get('workers',[]))
+    total_mat = sum(m.get('qty',0)*m.get('price',0) for m in l.get('materials',[]))
+    total_tr = sum(t.get('cost',0) for t in l.get('transport',[]))
+    return total_wage + total_mat + total_tr
+
+async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    logs = fb_get_all('dailyLogs')
+    logs.sort(key=lambda l: l.get('date',''), reverse=True)
+    logs = logs[:10]
+
+    if not logs:
+        msg = "📜 Записів ще немає"
+        if via_callback and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
+        else:
+            await update.message.reply_text(msg, reply_markup=main_keyboard())
+        return MAIN_MENU
+
+    buttons = []
+    for l in logs:
+        total = _log_total(l)
+        label = f"{fmt_date(l.get('date','—'))} | {l.get('objName','—')} · {fmt_money(total)}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"hist_{l['id']}")])
+
+    text = "📜 *Останні записи* (натисніть для деталей):"
+    if via_callback and update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    return HISTORY_LIST
+
+async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == 'hist_back':
+        return await show_history(update, context, via_callback=True)
+
+    if data.startswith('histdel_'):
+        if not is_owner(update.effective_user.id):
+            await query.edit_message_text("⛔ Тільки власник може видаляти записи.")
+            await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+            return MAIN_MENU
+        log_id = data.replace('histdel_', '')
+        fb_delete('dailyLogs', log_id)
+        await query.edit_message_text("✅ Запис видалено")
+        await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+        return MAIN_MENU
+
+    log_id = data.replace('hist_', '')
+    logs = fb_get_all('dailyLogs')
+    log = next((l for l in logs if l['id'] == log_id), None)
+    if not log:
+        await query.edit_message_text("❌ Запис не знайдено")
+        return MAIN_MENU
+
+    total = _log_total(log)
+    text = f"📅 *{fmt_date(log.get('date','—'))} | {log.get('objName','—')}*\n"
+    if log.get('submittedBy'):
+        text += f"✍️ Вніс: {log['submittedBy']}\n"
+    text += "\n"
+    if log.get('workers'):
+        text += "👷 *Робітники:*\n"
+        for w in log['workers']:
+            text += f"  • {w.get('name','')} — {w.get('hrs',0)}год"
+            if w.get('rate'):
+                text += f" = {fmt_money(w['hrs']*w['rate'])}"
+            text += "\n"
+    if log.get('materials'):
+        text += "\n📦 *Матеріали:*\n"
+        for m in log['materials']:
+            text += f"  • {m.get('name','')} — {m.get('qty',0)} {m.get('unit','шт')}"
+            if m.get('price'):
+                text += f" x {fmt_money(m['price'])} = {fmt_money(m['qty']*m['price'])}"
+            text += "\n"
+    if log.get('transport'):
+        text += "\n🚛 *Транспорт:*\n"
+        for t in log['transport']:
+            text += f"  • {t.get('name','')} — {fmt_money(t.get('cost',0))}\n"
+    if log.get('desc'):
+        text += f"\n📝 {log['desc']}\n"
+    text += f"\n💰 *РАЗОМ: {fmt_money(total)}*"
+
+    buttons = [[InlineKeyboardButton("🔙 До списку", callback_data="hist_back")]]
+    if is_owner(update.effective_user.id):
+        buttons.insert(0, [InlineKeyboardButton("🗑 Видалити цей запис", callback_data=f"histdel_{log_id}")])
+    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    return HISTORY_LIST
+
 # ── ОБ'ЄКТИ ──────────────────────────────────────────────────
 async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
@@ -1044,10 +1272,11 @@ async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❓ *Як користуватись ботом:*\n\n"
-        "📅 *Щоденний звіт* — вносити хто працював, матеріали, транспорт\n\n"
+        "📅 *Щоденний звіт* — оберіть дату (сьогодні/вчора/іншу), потім вносьте хто працював, матеріали, транспорт. На кожному кроці можна натиснути «↩️ Назад», якщо треба щось виправити\n\n"
         "🧾 *Фото чека* — сфотографуйте чек або накладну, бот розпізнає і запише\n\n"
-        "📦 *Склад* — перегляд залишків матеріалів\n\n"
+        "📦 *Склад* — перегляд залишків матеріалів, є пошук за назвою\n\n"
         "📊 *Звіт* — витрати та прибуток по об'єкту\n\n"
+        "📜 *Мої записи* — останні 10 записів, можна переглянути деталі або видалити\n\n"
         "💡 *Порада:* Всі дані синхронізуються з веб-програмою автоматично",
         parse_mode='Markdown',
         reply_markup=main_keyboard()
@@ -1059,6 +1288,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 # ── ГОЛОВНА ФУНКЦІЯ ───────────────────────────────────────────
+async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Щовечора перевіряє, чи внесено хоч один звіт сьогодні, і нагадує, якщо ні"""
+    settings = fb_get_all('settings')
+    admin = next((s for s in settings if s['id'] == 'admin'), None)
+    if not admin or not admin.get('chat_id'):
+        return
+    logs = fb_get_all('dailyLogs')
+    today_logs = [l for l in logs if l.get('date') == today_str()]
+    if today_logs:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=admin['chat_id'],
+            text="⏰ Нагадування: сьогодні ще не внесено жодного щоденного звіту!"
+        )
+    except Exception as e:
+        logger.error(f"Reminder send error: {e}")
+
 def main():
     init_firebase()
 
@@ -1074,6 +1321,10 @@ def main():
         states={
             MAIN_MENU: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
+            ],
+            SELECT_DATE: [
+                CallbackQueryHandler(date_callback, pattern='^date_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler),
             ],
             SELECT_OBJECT: [
                 CallbackQueryHandler(select_object, pattern='^obj_')
@@ -1103,6 +1354,17 @@ def main():
             RECEIPT_TARGET: [
                 CallbackQueryHandler(receipt_target_callback, pattern='^rec'),
             ],
+            STOCK_ACTION: [
+                CallbackQueryHandler(stock_action_callback, pattern='^stock_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
+            ],
+            STOCK_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_search_handler),
+            ],
+            HISTORY_LIST: [
+                CallbackQueryHandler(history_detail_callback, pattern='^hist'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
+            ],
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
@@ -1113,6 +1375,11 @@ def main():
     app.add_handler(conv_handler)
     # Report callback (outside conversation for /start re-entry)
     app.add_handler(CallbackQueryHandler(report_callback, pattern='^rep_'))
+
+    if app.job_queue:
+        app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
+    else:
+        logger.error("JobQueue недоступний — нагадування вимкнено (потрібен пакет python-telegram-bot[job-queue])")
 
     logger.info("Бот запущено! ✅")
     app.run_polling(drop_pending_updates=True)
