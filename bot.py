@@ -60,7 +60,8 @@ def is_owner(user_id):
     RECEIPT_PHOTO, RECEIPT_CONFIRM, RECEIPT_TARGET,
     STOCK_ACTION, STOCK_NAME, STOCK_QTY,
     HISTORY_LIST,
-) = range(15)
+    OBJECTS_ACTION, OBJ_INPUT,
+) = range(17)
 
 # ── FIREBASE ──────────────────────────────────────────────────
 db = None
@@ -157,12 +158,7 @@ def main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid):
-        await update.message.reply_text(
-            f"⛔ У вас немає доступу до цього бота.\n"
-            f"Зверніться до адміністратора.\n\n"
-            f"🆔 Ваш ID: {uid}\n"
-            f"⚙️ ALLOWED_USER_IDS на сервері: {ALLOWED_IDS}"
-        )
+        await update.message.reply_text("⛔ У вас немає доступу до цього бота.\nЗверніться до адміністратора.")
         return ConversationHandler.END
 
     name = update.effective_user.first_name
@@ -1259,19 +1255,82 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
 # ── ОБ'ЄКТИ ──────────────────────────────────────────────────
 async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
-    if not objects:
-        await update.message.reply_text("🏗️ Об'єктів немає", reply_markup=main_keyboard())
-        return MAIN_MENU
 
     text = "🏗️ *Об'єкти:*\n\n"
+    if not objects:
+        text = "🏗️ Об'єктів немає\n\n"
     for o in objects:
         status = {'active':'🟢','plan':'🔵','done':'✅','pause':'⏸️'}.get(o.get('status',''),'⚪')
         text += f"{status} *{o['name']}*\n"
         if o.get('client'): text += f"   👤 {o['client']}\n"
         if o.get('contract'): text += f"   💰 {fmt_money(o['contract'])}\n"
 
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=main_keyboard())
+    buttons = [[InlineKeyboardButton("➕ Додати об'єкт", callback_data="addobj_start")]]
+    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    return OBJECTS_ACTION
+
+async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'addobj_start':
+        await query.edit_message_text("✏️ Введіть назву нового об'єкта:")
+        context.user_data['awaiting'] = 'new_obj_name'
+        context.user_data['new_obj'] = {}
+        return OBJ_INPUT
     return MAIN_MENU
+
+async def skip_new_obj(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    awaiting = context.user_data.get('awaiting', '')
+    if awaiting == 'new_obj_client':
+        context.user_data['awaiting'] = 'new_obj_contract'
+        await update.message.reply_text("💰 Сума договору, ₴ (число, або /skip якщо невідомо):")
+        return OBJ_INPUT
+    if awaiting == 'new_obj_contract':
+        return await save_new_object(update, context)
+    return OBJ_INPUT
+
+async def save_new_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    obj = context.user_data.get('new_obj', {})
+    obj.setdefault('status', 'active')
+    obj.setdefault('client', '')
+    obj.setdefault('contract', 0)
+    doc_id = fb_add('objects', obj)
+    context.user_data.pop('new_obj', None)
+    context.user_data.pop('awaiting', None)
+    if doc_id:
+        await update.message.reply_text(f"✅ Об'єкт «{obj['name']}» додано!", reply_markup=main_keyboard())
+    else:
+        await update.message.reply_text("❌ Помилка збереження. Перевірте Firebase.", reply_markup=main_keyboard())
+    return MAIN_MENU
+
+async def new_object_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    awaiting = context.user_data.get('awaiting', '')
+
+    if awaiting == 'new_obj_name':
+        if not text:
+            await update.message.reply_text("❌ Назва не може бути порожньою. Введіть назву об'єкта:")
+            return OBJ_INPUT
+        context.user_data['new_obj']['name'] = text
+        context.user_data['awaiting'] = 'new_obj_client'
+        await update.message.reply_text("👤 Ім'я клієнта/контактної особи (або /skip):")
+        return OBJ_INPUT
+
+    if awaiting == 'new_obj_client':
+        context.user_data['new_obj']['client'] = text
+        context.user_data['awaiting'] = 'new_obj_contract'
+        await update.message.reply_text("💰 Сума договору, ₴ (число, або /skip якщо невідомо):")
+        return OBJ_INPUT
+
+    if awaiting == 'new_obj_contract':
+        try:
+            contract = float(text.replace(',', '.').replace(' ', ''))
+        except:
+            contract = 0
+        context.user_data['new_obj']['contract'] = contract
+        return await save_new_object(update, context)
+
+    return OBJ_INPUT
 
 # ── ДОПОМОГА ──────────────────────────────────────────────────
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1369,6 +1428,14 @@ def main():
             HISTORY_LIST: [
                 CallbackQueryHandler(history_detail_callback, pattern='^hist'),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
+            ],
+            OBJECTS_ACTION: [
+                CallbackQueryHandler(objects_action_callback, pattern='^addobj'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
+            ],
+            OBJ_INPUT: [
+                CommandHandler('skip', skip_new_obj),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, new_object_text_handler),
             ],
         },
         fallbacks=[
