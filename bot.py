@@ -157,7 +157,12 @@ def main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid):
-        await update.message.reply_text("⛔ У вас немає доступу до цього бота.\nЗверніться до адміністратора.")
+        await update.message.reply_text(
+            f"⛔ У вас немає доступу до цього бота.\n"
+            f"Зверніться до адміністратора.\n\n"
+            f"🆔 Ваш ID: {uid}\n"
+            f"⚙️ ALLOWED_USER_IDS на сервері: {ALLOWED_IDS}"
+        )
         return ConversationHandler.END
 
     name = update.effective_user.first_name
