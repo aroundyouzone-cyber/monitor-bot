@@ -470,6 +470,15 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if mat.get('stock_id') and stock_data:
                 stock_data['qty'] = new_qty
                 fb_set('matStock', mat['stock_id'], stock_data)
+                daily = context.user_data.get('daily', {})
+                fb_add('stockMoves', {
+                    'matId': mat['stock_id'],
+                    'type': 'out',
+                    'qty': qty,
+                    'price': mat.get('price', 0),
+                    'date': daily.get('date') or today_str(),
+                    'note': f"Бот · щоденний звіт · {daily.get('objName','')}".strip(' ·')
+                })
             context.user_data.pop('pending_material', None)
             context.user_data.pop('awaiting', None)
             warn = "\n⚠️ Залишок став від'ємним!" if new_qty < 0 else ""
@@ -987,14 +996,24 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             if existing:
                 existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
                 fb_set('matStock', existing['id'], existing)
+                mat_id = existing['id']
             else:
-                fb_add('matStock', {
+                mat_id = fb_add('matStock', {
                     'name': item['name'],
                     'qty': item.get('qty', 0),
                     'unit': item.get('unit', 'шт'),
                     'price': item.get('price', 0),
                     'supplier': receipt.get('supplier', ''),
                     'min': 0, 'cat': '', 'sku': '', 'note': ''
+                })
+            if mat_id:
+                fb_add('stockMoves', {
+                    'matId': mat_id,
+                    'type': 'in',
+                    'qty': item.get('qty', 0),
+                    'price': item.get('price', 0),
+                    'date': receipt.get('date') or today_str(),
+                    'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}"
                 })
             saved += 1
 
