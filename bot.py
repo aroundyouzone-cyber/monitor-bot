@@ -8,6 +8,10 @@ import os
 import json
 import logging
 import base64
+import csv
+import io
+import urllib.request
+import urllib.error
 from datetime import datetime, date, timedelta, time as dtime
 from io import BytesIO
 
@@ -36,6 +40,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
 FIREBASE_KEY = os.environ.get('FIREBASE_KEY', '')   # JSON рядок з ключем Firebase
 CLAUDE_KEY   = os.environ.get('GEMINI_API_KEY', '')
+
+# ── СИНХРОНІЗАЦІЯ З GOOGLE-ТАБЛИЦЕЮ "Облік_продажу" ───────────
+SHEET_ID          = os.environ.get('SHEET_ID', '1LUB5jakppvWBo9MQN2ouRM7HKao4dv9MpDkKWsRWh0Y')
+SHEET_GID_PURCHASES = os.environ.get('SHEET_GID_PURCHASES', '416162921')   # аркуш "Закупки"
+SHEET_GID_SALES      = os.environ.get('SHEET_GID_SALES', '1456202155')     # аркуш "Продажі"
 
 # ── ДОСТУП (задається через змінні середовища) ────────────────
 # ALLOWED_USER_IDS: через кому, напр. "123456789,987654321"
@@ -1594,6 +1603,162 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗄️ Формую резервну копію...")
     await send_backup(context, chat_id=update.effective_chat.id)
 
+# ── СИНХРОНІЗАЦІЯ З GOOGLE-ТАБЛИЦЕЮ "Облік_продажу" ───────────
+def _parse_ua_number(s):
+    """Перетворює число у форматі '10 454,40' або '96,80' на float."""
+    if s is None:
+        return 0.0
+    s = str(s).strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
+    if not s:
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+def _parse_ua_date(s):
+    """Перетворює дату 'ДД.ММ.РРРР' на 'РРРР-ММ-ДД'. Порожнє або незрозуміле — повертає ''."""
+    s = (s or '').strip()
+    if not s:
+        return ''
+    parts = s.split('.')
+    if len(parts) == 3:
+        d, m, y = parts
+        if len(y) == 2:
+            y = '20' + y
+        try:
+            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+        except ValueError:
+            return ''
+    return ''
+
+def _currency_from_sheet(s):
+    s = (s or '').strip()
+    return 'USD' if '$' in s else 'UAH'
+
+def _fetch_sheet_rows(gid):
+    """Завантажує аркуш Google-таблиці (за gid) як список словників (csv.DictReader)."""
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+    text = raw.decode('utf-8-sig')
+    return list(csv.DictReader(io.StringIO(text)))
+
+async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, manual=False):
+    """Підтягує нові закупівлі/продажі з Google-таблиці "Облік_продажу" в Firestore.
+    Записи, які вже перенесені раніше (за excelId), пропускаються — тому безпечно
+    викликати повторно скільки завгодно."""
+    if not db:
+        return
+    try:
+        purchase_rows = _fetch_sheet_rows(SHEET_GID_PURCHASES)
+        sale_rows = _fetch_sheet_rows(SHEET_GID_SALES)
+    except Exception as e:
+        logger.error(f"Sync fetch error: {e}")
+        if manual and chat_id:
+            await context.bot.send_message(chat_id, f"❌ Не вдалося завантажити таблицю: {e}")
+        return
+
+    existing_purchases = fb_get_all('purchases')
+    existing_sales = fb_get_all('sales')
+    excel_to_fsid = {p.get('excelId'): p['id'] for p in existing_purchases if p.get('excelId')}
+    existing_purchase_eids = set(excel_to_fsid.keys())
+    existing_sale_eids = {s.get('excelId') for s in existing_sales if s.get('excelId')}
+
+    added_purchases = 0
+    for row in purchase_rows:
+        eid = (row.get('№ закупки') or '').strip()
+        name = (row.get('Найменування') or '').strip()
+        if not eid or not name or eid in existing_purchase_eids:
+            continue
+        qty = _parse_ua_number(row.get('К-ть закуплено'))
+        if qty <= 0:
+            continue
+        doc_id = fb_add('purchases', {
+            'name': name,
+            'supplier': (row.get('Постачальник') or '').strip(),
+            'supplierPhone': (row.get('Контакт постачальника') or '').strip(),
+            'date': _parse_ua_date(row.get('Дата закупки')) or today_str(),
+            'qty': qty,
+            'unit': (row.get('Од. вим.') or 'шт').strip() or 'шт',
+            'price': _parse_ua_number(row.get('Ціна закупки (за од.)')),
+            'currency': _currency_from_sheet(row.get('Валюта закупки')),
+            'rate': _parse_ua_number(row.get('Курс на дату закупки')) or 1,
+            'note': (row.get('№ накладної/чека') or '').strip(),
+            'excelId': eid,
+            'source': 'excel-sync',
+        })
+        if doc_id:
+            excel_to_fsid[eid] = doc_id
+            existing_purchase_eids.add(eid)
+            added_purchases += 1
+
+    added_sales = 0
+    for row in sale_rows:
+        eid = (row.get('№ продажу') or '').strip()
+        name = (row.get('Найменування') or '').strip()
+        if not eid or not name or eid in existing_sale_eids:
+            continue
+        qty = _parse_ua_number(row.get('К-ть продано'))
+        if qty <= 0:
+            continue
+        purchase_eid = (row.get('№ закупки') or '').strip()
+        purchase_fsid = excel_to_fsid.get(purchase_eid, '')
+        sale_currency = _currency_from_sheet(row.get('Валюта продажу'))
+        cost_currency = _currency_from_sheet(row.get('Валюта закупки'))
+        paid_raw = (row.get('Статус оплати') or '').strip().lower()
+        paid = paid_raw in ('так', 'оплачено', 'paid', '✓', '+', 'оплата')
+        note_bits = []
+        inv_ref = (row.get('№ накладної/чека') or '').strip()
+        if inv_ref:
+            note_bits.append(f"Накладна (Excel): {inv_ref}")
+        doc_id = fb_add('sales', {
+            'purchaseId': purchase_fsid,
+            'name': name,
+            'buyer': (row.get('Покупець') or '').strip(),
+            'buyerContact': (row.get('Контакт покупця') or '').strip(),
+            'siteAddress': (row.get("Об'єкт/адреса монтажу") or '').strip(),
+            'objId': '',
+            'date': _parse_ua_date(row.get('Дата продажу')) or today_str(),
+            'warrantyUntil': _parse_ua_date(row.get('Гарантія до')),
+            'qty': qty,
+            'price': _parse_ua_number(row.get('Ціна продажна (за од.)')),
+            'currency': sale_currency,
+            'rate': _parse_ua_number(row.get('Курс на дату продажу')) or 1,
+            'costPrice': _parse_ua_number(row.get('Ціна закупки (за од.)')),
+            'costCurrency': cost_currency,
+            'costRate': _parse_ua_number(row.get('Курс на дату продажу')) or 1,
+            'paid': paid,
+            'invoiceId': '',
+            'note': ' · '.join(note_bits),
+            'excelId': eid,
+            'source': 'excel-sync',
+        })
+        if doc_id:
+            existing_sale_eids.add(eid)
+            added_sales += 1
+
+    if added_purchases or added_sales or manual:
+        msg = f"🔄 Синхронізація Excel → програма: +{added_purchases} закупівель, +{added_sales} продажів"
+        logger.info(msg)
+        if chat_id:
+            await context.bot.send_message(chat_id, msg)
+        elif OWNER_ID and (added_purchases or added_sales):
+            try:
+                await context.bot.send_message(int(OWNER_ID), msg)
+            except Exception as e:
+                logger.error(f"Sync notify error: {e}")
+
+async def sync_sheets_job(context: ContextTypes.DEFAULT_TYPE):
+    """Періодична автоматична синхронізація (кожні 15 хв)."""
+    await sync_from_sheets(context)
+
+async def sync_sheets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /syncsheets — синхронізація на вимогу."""
+    await update.message.reply_text("🔄 Перевіряю таблицю на нові записи...")
+    await sync_from_sheets(context, chat_id=update.effective_chat.id, manual=True)
+
 async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Щовечора перевіряє, чи внесено хоч один звіт сьогодні, і нагадує, якщо ні"""
     settings = fb_get_all('settings')
@@ -1706,11 +1871,14 @@ def main():
     app.add_handler(CallbackQueryHandler(report_callback, pattern='^rep_'))
     # Ручна резервна копія на вимогу
     app.add_handler(CommandHandler('backup', backup_command))
+    # Ручна синхронізація з Google-таблицею на вимогу
+    app.add_handler(CommandHandler('syncsheets', sync_sheets_command))
 
     if app.job_queue:
         app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
         app.job_queue.run_daily(morning_plan_digest, time=dtime(hour=8, minute=0))
         app.job_queue.run_daily(daily_backup_job, time=dtime(hour=2, minute=0))
+        app.job_queue.run_repeating(sync_sheets_job, interval=900, first=60)
     else:
         logger.error("JobQueue недоступний — нагадування вимкнено (потрібен пакет python-telegram-bot[job-queue])")
 
