@@ -1553,6 +1553,47 @@ async def morning_plan_digest(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Morning digest send error: {e}")
 
+async def send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
+    """Формує JSON-резервну копію всіх колекцій Firestore і надсилає документом у Telegram."""
+    if not db:
+        return
+    if chat_id is None:
+        settings = fb_get_all('settings')
+        admin = next((s for s in settings if s['id'] == 'admin'), None)
+        if not admin or not admin.get('chat_id'):
+            return
+        chat_id = admin['chat_id']
+    try:
+        backup = {}
+        total_docs = 0
+        for col_ref in db.collections():
+            col_data = {}
+            for d in col_ref.stream():
+                col_data[d.id] = d.to_dict()
+                total_docs += 1
+            backup[col_ref.id] = col_data
+        payload = json.dumps(backup, ensure_ascii=False, indent=2, default=str)
+        bio = BytesIO(payload.encode('utf-8'))
+        fname = f"backup_{today_str()}.json"
+        bio.name = fname
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=bio,
+            filename=fname,
+            caption=f"🗄️ Резервна копія бази даних · {fmt_date(today_str())}\nКолекцій: {len(backup)} · Документів: {total_docs}"
+        )
+    except Exception as e:
+        logger.error(f"Backup send error: {e}")
+
+async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
+    """Щоденна автоматична резервна копія (о 02:00) — надсилається адміну."""
+    await send_backup(context)
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /backup — миттєва резервна копія на вимогу."""
+    await update.message.reply_text("🗄️ Формую резервну копію...")
+    await send_backup(context, chat_id=update.effective_chat.id)
+
 async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Щовечора перевіряє, чи внесено хоч один звіт сьогодні, і нагадує, якщо ні"""
     settings = fb_get_all('settings')
@@ -1663,10 +1704,13 @@ def main():
     app.add_handler(conv_handler)
     # Report callback (outside conversation for /start re-entry)
     app.add_handler(CallbackQueryHandler(report_callback, pattern='^rep_'))
+    # Ручна резервна копія на вимогу
+    app.add_handler(CommandHandler('backup', backup_command))
 
     if app.job_queue:
         app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
         app.job_queue.run_daily(morning_plan_digest, time=dtime(hour=8, minute=0))
+        app.job_queue.run_daily(daily_backup_job, time=dtime(hour=2, minute=0))
     else:
         logger.error("JobQueue недоступний — нагадування вимкнено (потрібен пакет python-telegram-bot[job-queue])")
 
