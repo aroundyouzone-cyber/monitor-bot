@@ -61,7 +61,8 @@ def is_owner(user_id):
     STOCK_ACTION, STOCK_NAME, STOCK_QTY,
     HISTORY_LIST,
     OBJECTS_ACTION, OBJ_INPUT,
-) = range(17)
+    PLAN_MENU, PLAN_TEXT, PLAN_DATE, PLAN_TIME,
+) = range(21)
 
 # ── FIREBASE ──────────────────────────────────────────────────
 db = None
@@ -151,6 +152,7 @@ def main_keyboard():
         ['📅 Щоденний звіт', '🧾 Фото чека/накладної'],
         ['📦 Склад', '📊 Звіт по об\'єкту'],
         ['🏗️ Об\'єкти', '📜 Мої записи'],
+        ['📆 Планування'],
         ['❓ Допомога'],
     ], resize_keyboard=True)
 
@@ -171,7 +173,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 📅 Вносити щоденний звіт\n"
         f"• 🧾 Фотографувати чеки та накладні\n"
         f"• 📦 Переглядати та поповнювати склад\n"
-        f"• 📊 Дивитись звіти по об'єктах\n\n"
+        f"• 📊 Дивитись звіти по об'єктах\n"
+        f"• 📆 Додавати нагадування та плани\n\n"
         f"Обери дію:",
         parse_mode='Markdown',
         reply_markup=main_keyboard()
@@ -194,6 +197,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_objects(update, context)
     elif text == '📜 Мої записи':
         return await show_history(update, context)
+    elif text == '📆 Планування':
+        return await start_plan(update, context)
     elif text == '❓ Допомога':
         await show_help(update, context)
         return MAIN_MENU
@@ -1360,6 +1365,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📦 *Склад* — перегляд залишків матеріалів, є пошук за назвою\n\n"
         "📊 *Звіт* — витрати та прибуток по об'єкту\n\n"
         "📜 *Мої записи* — останні 10 записів, можна переглянути деталі або видалити\n\n"
+        "📆 *Планування* — додайте нагадування чи план на дату, і бот сам надішле список о 8:00 ранку в день події\n\n"
         "💡 *Порада:* Всі дані синхронізуються з веб-програмою автоматично",
         parse_mode='Markdown',
         reply_markup=main_keyboard()
@@ -1371,6 +1377,182 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 # ── ГОЛОВНА ФУНКЦІЯ ───────────────────────────────────────────
+# ── ПЛАНУВАННЯ (НАГАДУВАННЯ ТА ПЛАНИ) ─────────────────────────
+async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [InlineKeyboardButton("➕ Додати нагадування", callback_data="plan_add")],
+        [InlineKeyboardButton("📋 Найближчі", callback_data="plan_list")],
+    ]
+    await update.message.reply_text(
+        "📆 *Планування*\n\nДодайте нагадування чи план на дату — вранці о 8:00 в день події бот надішле список.",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return PLAN_MENU
+
+async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'plan_add':
+        await query.edit_message_text("✏️ Введіть текст нагадування чи плану:")
+        return PLAN_TEXT
+    if query.data == 'plan_list':
+        return await show_plan_list(update, context, via_callback=True)
+    return PLAN_MENU
+
+async def plan_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("✏️ Введіть текст нагадування чи плану:")
+        return PLAN_TEXT
+    context.user_data['pending_plan'] = {'name': text}
+    buttons = [
+        [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
+         InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
+        [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
+    ]
+    await update.message.reply_text("🗓 На яку дату?", reply_markup=InlineKeyboardMarkup(buttons))
+    return PLAN_DATE
+
+async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == 'plandate_today':
+        return await ask_plan_time(update, context, today_str(), via_callback=True)
+    if data == 'plandate_tomorrow':
+        d = (date.today() + timedelta(days=1)).isoformat()
+        return await ask_plan_time(update, context, d, via_callback=True)
+    if data == 'plandate_custom':
+        await query.edit_message_text("✏️ Введіть дату у форматі ДД.ММ.РРРР (наприклад: 28.09.2026):")
+        context.user_data['awaiting_plan_date'] = True
+        return PLAN_DATE
+    return PLAN_DATE
+
+async def plan_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_plan_date'):
+        await update.message.reply_text("⚠️ Скористайтесь кнопками вище.")
+        return PLAN_DATE
+    text = update.message.text.strip()
+    try:
+        parts = text.replace('/', '.').replace('-', '.').split('.')
+        if len(parts) != 3:
+            raise ValueError
+        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+        chosen = date(y, m, d).isoformat()
+        context.user_data.pop('awaiting_plan_date', None)
+        return await ask_plan_time(update, context, chosen, via_callback=False)
+    except Exception:
+        await update.message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.09.2026)")
+        return PLAN_DATE
+
+async def ask_plan_time(update, context, chosen_date, via_callback):
+    context.user_data.setdefault('pending_plan', {})['date'] = chosen_date
+    buttons = [[InlineKeyboardButton("⏭ Без часу", callback_data="plantime_skip")]]
+    msg = "🕐 Час (наприклад 14:30) — або натисніть «Без часу»:"
+    if via_callback:
+        await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+    return PLAN_TIME
+
+async def plan_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == 'plantime_skip':
+        return await save_plan_event(update, context, '', via_callback=True)
+    return PLAN_TIME
+
+async def plan_time_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import re
+    text = update.message.text.strip()
+    if re.match(r'^\d{1,2}:\d{2}$', text):
+        return await save_plan_event(update, context, text, via_callback=False)
+    await update.message.reply_text("❌ Формат часу: ГГ:ХХ, наприклад 14:30 — або натисніть «Без часу» вище")
+    return PLAN_TIME
+
+async def save_plan_event(update, context, time_str, via_callback):
+    plan = context.user_data.pop('pending_plan', {})
+    if not plan.get('name') or not plan.get('date'):
+        text = "❌ Щось пішло не так, спробуйте додати нагадування ще раз."
+    else:
+        plan['time'] = time_str
+        plan.setdefault('type', 'other')
+        plan.setdefault('objId', '')
+        plan.setdefault('priority', 'normal')
+        plan.setdefault('note', '')
+        fb_add('planEvents', plan)
+        text = f"✅ Додано: {plan.get('name')}\n📅 {fmt_date(plan.get('date',''))}" + (f" о {time_str}" if time_str else "")
+    if via_callback:
+        await update.callback_query.edit_message_text(text)
+        await update.callback_query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+    else:
+        await update.message.reply_text(text, reply_markup=main_keyboard())
+    return MAIN_MENU
+
+async def show_plan_list(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    events = fb_get_all('planEvents')
+    todaystr = today_str()
+    upcoming = sorted(
+        [e for e in events if e.get('date', '') >= todaystr],
+        key=lambda e: (e.get('date', ''), e.get('time', '') or '99:99')
+    )[:15]
+    if not upcoming:
+        text = "📋 Немає запланованих нагадувань чи планів."
+    else:
+        lines = ["📋 *Найближчі плани:*\n"]
+        for e in upcoming:
+            t = f" о {e['time']}" if e.get('time') else ""
+            lines.append(f"• {fmt_date(e.get('date',''))}{t} — {e.get('name','')}")
+        text = "\n".join(lines)
+    if via_callback:
+        await update.callback_query.edit_message_text(text, parse_mode='Markdown')
+        await update.callback_query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=main_keyboard())
+    return MAIN_MENU
+
+async def morning_plan_digest(context: ContextTypes.DEFAULT_TYPE):
+    """Щоранку о 8:00 надсилає список нагадувань/планів, зустрічей на сьогодні
+    та попередження про матеріали, яких бракує на складі"""
+    settings = fb_get_all('settings')
+    admin = next((s for s in settings if s['id'] == 'admin'), None)
+    if not admin or not admin.get('chat_id'):
+        return
+    todaystr = today_str()
+    events = [e for e in fb_get_all('planEvents') if e.get('date') == todaystr]
+    meets = [m for m in fb_get_all('meetings') if m.get('date') == todaystr]
+    low_stock = [m for m in fb_get_all('matStock') if (m.get('qty') or 0) < (m.get('min') or 0)]
+
+    if not events and not meets and not low_stock:
+        return
+
+    lines = [f"☀️ Доброго ранку! ({fmt_date(todaystr)})\n"]
+
+    if events or meets:
+        items = sorted(
+            [{'time': e.get('time', ''), 'name': e.get('name', ''), 'icon': '📌'} for e in events] +
+            [{'time': m.get('time', ''), 'name': m.get('name', ''), 'icon': '🤝'} for m in meets],
+            key=lambda x: x['time'] or '99:99'
+        )
+        lines.append("📆 *На сьогодні:*")
+        for it in items:
+            t = f"{it['time']} — " if it['time'] else ""
+            lines.append(f"{it['icon']} {t}{it['name']}")
+
+    if low_stock:
+        if events or meets:
+            lines.append("")
+        lines.append("⚠️ *Закінчується на складі:*")
+        for m in sorted(low_stock, key=lambda x: x.get('name', '')):
+            need = max((m.get('min') or 0) - (m.get('qty') or 0), 0)
+            lines.append(f"📦 {m.get('name','')} — залишок {m.get('qty',0)} {m.get('unit','')} (докупити ~{need} {m.get('unit','')})")
+
+    try:
+        await context.bot.send_message(chat_id=admin['chat_id'], text="\n".join(lines), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Morning digest send error: {e}")
+
 async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Щовечора перевіряє, чи внесено хоч один звіт сьогодні, і нагадує, якщо ні"""
     settings = fb_get_all('settings')
@@ -1456,6 +1638,21 @@ def main():
                 CommandHandler('skip', skip_new_obj),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, new_object_text_handler),
             ],
+            PLAN_MENU: [
+                CallbackQueryHandler(plan_menu_callback, pattern='^plan_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
+            ],
+            PLAN_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_text_input),
+            ],
+            PLAN_DATE: [
+                CallbackQueryHandler(plan_date_callback, pattern='^plandate_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_date_text),
+            ],
+            PLAN_TIME: [
+                CallbackQueryHandler(plan_time_callback, pattern='^plantime_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_time_text),
+            ],
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
@@ -1469,6 +1666,7 @@ def main():
 
     if app.job_queue:
         app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
+        app.job_queue.run_daily(morning_plan_digest, time=dtime(hour=8, minute=0))
     else:
         logger.error("JobQueue недоступний — нагадування вимкнено (потрібен пакет python-telegram-bot[job-queue])")
 
