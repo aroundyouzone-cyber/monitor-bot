@@ -1665,6 +1665,13 @@ async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, man
     excel_to_fsid = {p.get('excelId'): p['id'] for p in existing_purchases if p.get('excelId')}
     existing_purchase_eids = set(excel_to_fsid.keys())
     existing_sale_eids = {s.get('excelId') for s in existing_sales if s.get('excelId')}
+    # eid -> {fsid, rate, currency, price} — джерело правди для собівартості продажу,
+    # бо в аркуші "Продажі" курс/валюта закупівлі не завжди продубльовані коректно
+    purchase_info = {
+        p.get('excelId'): {'fsid': p['id'], 'rate': p.get('rate') or 1,
+                            'currency': p.get('currency') or 'UAH', 'price': p.get('price') or 0}
+        for p in existing_purchases if p.get('excelId')
+    }
 
     added_purchases = 0
     for row in purchase_rows:
@@ -1675,6 +1682,9 @@ async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, man
         qty = _parse_ua_number(row.get('К-ть закуплено'))
         if qty <= 0:
             continue
+        p_price = _parse_ua_number(row.get('Ціна закупки (за од.)'))
+        p_currency = _currency_from_sheet(row.get('Валюта закупки'))
+        p_rate = _parse_ua_number(row.get('Курс на дату закупки')) or 1
         doc_id = fb_add('purchases', {
             'name': name,
             'supplier': (row.get('Постачальник') or '').strip(),
@@ -1682,9 +1692,9 @@ async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, man
             'date': _parse_ua_date(row.get('Дата закупки')) or today_str(),
             'qty': qty,
             'unit': (row.get('Од. вим.') or 'шт').strip() or 'шт',
-            'price': _parse_ua_number(row.get('Ціна закупки (за од.)')),
-            'currency': _currency_from_sheet(row.get('Валюта закупки')),
-            'rate': _parse_ua_number(row.get('Курс на дату закупки')) or 1,
+            'price': p_price,
+            'currency': p_currency,
+            'rate': p_rate,
             'note': (row.get('№ накладної/чека') or '').strip(),
             'excelId': eid,
             'source': 'excel-sync',
@@ -1692,6 +1702,7 @@ async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, man
         if doc_id:
             excel_to_fsid[eid] = doc_id
             existing_purchase_eids.add(eid)
+            purchase_info[eid] = {'fsid': doc_id, 'rate': p_rate, 'currency': p_currency, 'price': p_price}
             added_purchases += 1
 
     added_sales = 0
@@ -1704,9 +1715,22 @@ async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, man
         if qty <= 0:
             continue
         purchase_eid = (row.get('№ закупки') or '').strip()
-        purchase_fsid = excel_to_fsid.get(purchase_eid, '')
+        pinfo = purchase_info.get(purchase_eid)
+        purchase_fsid = pinfo['fsid'] if pinfo else ''
         sale_currency = _currency_from_sheet(row.get('Валюта продажу'))
-        cost_currency = _currency_from_sheet(row.get('Валюта закупки'))
+        sale_rate = _parse_ua_number(row.get('Курс на дату продажу'))
+        if sale_rate <= 0:
+            # У рядку продажу курс не заповнено — якщо валюта та сама, що й у партії
+            # закупівлі, беремо курс звідти (найімовірніше та сама угода), інакше 1
+            sale_rate = pinfo['rate'] if (pinfo and pinfo['currency'] == sale_currency) else 1
+        # Собівартість завжди беремо з самої партії закупівлі (джерело правди),
+        # а не з можливо порожніх/неточних дубльованих колонок в аркуші "Продажі"
+        if pinfo:
+            cost_price, cost_currency, cost_rate = pinfo['price'], pinfo['currency'], pinfo['rate']
+        else:
+            cost_price = _parse_ua_number(row.get('Ціна закупки (за од.)'))
+            cost_currency = _currency_from_sheet(row.get('Валюта закупки'))
+            cost_rate = sale_rate
         paid_raw = (row.get('Статус оплати') or '').strip().lower()
         paid = paid_raw in ('так', 'оплачено', 'paid', '✓', '+', 'оплата')
         note_bits = []
@@ -1725,10 +1749,10 @@ async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, man
             'qty': qty,
             'price': _parse_ua_number(row.get('Ціна продажна (за од.)')),
             'currency': sale_currency,
-            'rate': _parse_ua_number(row.get('Курс на дату продажу')) or 1,
-            'costPrice': _parse_ua_number(row.get('Ціна закупки (за од.)')),
+            'rate': sale_rate,
+            'costPrice': cost_price,
             'costCurrency': cost_currency,
-            'costRate': _parse_ua_number(row.get('Курс на дату продажу')) or 1,
+            'costRate': cost_rate,
             'paid': paid,
             'invoiceId': '',
             'note': ' · '.join(note_bits),
