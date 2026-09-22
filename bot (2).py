@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import json
 import logging
 import base64
@@ -844,7 +845,8 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🧾 *Фото чека або накладної*\n\n"
-        "Надішліть фото документу — бот розпізнає матеріали і суму автоматично.\n\n"
+        "Надішліть фото документу — бот розпізнає матеріали, суму і номер документа (чека/накладної/рахунка) автоматично. "
+        "Якщо номер не розпізнався або його треба виправити — на наступному кроці буде кнопка \"🔖 Додати/Змінити № документа\".\n\n"
         "Або введіть вручну у форматі:\n"
         "`Назва матеріалу кількість одиниця ціна`\n"
         "Наприклад: `Кабель ВВГ 50 м 38`",
@@ -880,6 +882,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {
   "supplier": "назва магазину/постачальника",
   "date": "дата YYYY-MM-DD або null",
+  "docNumber": "номер документу (номер чека, номер або серія накладної, номер рахунку/фактури) або null, якщо не вказано",
   "total": 1234.50,
   "items": [
     {"name": "назва товару", "qty": 2, "unit": "шт", "price": 150.0, "amount": 300.0}
@@ -956,34 +959,74 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return RECEIPT_PHOTO
 
-async def show_receipt_preview(update, context):
-    receipt = context.user_data.get('receipt', {})
+def doc_number_suffix(receipt):
+    """' · № 12345' if the receipt/invoice number was recognized or entered, else ''"""
+    num = (receipt.get('docNumber') or '').strip()
+    return f" · № {num}" if num else ""
+
+def md_safe(text):
+    """Strip characters that break Telegram's legacy Markdown parser (*_`[) when interpolating
+    arbitrary OCR-recognized text (item names, supplier, doc numbers) into a Markdown message.
+    Without this, a product name like 'D65*45' crashes the whole preview with
+    'Can't parse entities' and the bot looks unresponsive."""
+    if not text:
+        return text
+    return re.sub(r'[*_`\[\]]', '', str(text))
+
+def build_receipt_preview_text(receipt):
     items = receipt.get('items', [])
 
     text = "🧾 *Розпізнано:*\n\n"
     if receipt.get('supplier'):
-        text += f"🏪 {receipt['supplier']}\n"
+        text += f"🏪 {md_safe(receipt['supplier'])}\n"
     if receipt.get('date'):
         text += f"📅 {fmt_date(receipt['date'])}\n"
+    if receipt.get('docNumber'):
+        text += f"🔖 № {md_safe(receipt['docNumber'])}\n"
     text += "\n"
 
     for item in items:
-        text += f"• {item['name']} — {item['qty']} {item.get('unit','шт')} × {fmt_money(item.get('price',0))} = {fmt_money(item.get('amount',0))}\n"
+        text += f"• {md_safe(item['name'])} — {item['qty']} {item.get('unit','шт')} × {fmt_money(item.get('price',0))} = {fmt_money(item.get('amount',0))}\n"
 
     if receipt.get('total'):
         text += f"\n💰 *Разом: {fmt_money(receipt['total'])}*"
 
     text += "\n\nКуди записати?"
+    return text
 
-    buttons = [
+def receipt_preview_buttons(receipt):
+    docnum_label = "🔖 Змінити № документа" if receipt.get('docNumber') else "🔖 Додати № документа"
+    return [
         [InlineKeyboardButton("📦 На склад", callback_data="rec_stock"),
          InlineKeyboardButton("🏗️ На об'єкт", callback_data="rec_object")],
         [InlineKeyboardButton("🧾 В Закупки (без складу)", callback_data="rec_purchase")],
+        [InlineKeyboardButton(docnum_label, callback_data="rec_docnum")],
         [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
     ]
 
-    await update.message.reply_text(text, parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(buttons))
+async def send_receipt_preview_message(update, receipt):
+    """Send the receipt preview, falling back to plain text if Markdown parsing still fails
+    for some unforeseen character in OCR'd text — better a plain message than a silent crash."""
+    text = build_receipt_preview_text(receipt)
+    markup = InlineKeyboardMarkup(receipt_preview_buttons(receipt))
+    try:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Receipt preview Markdown error, resending as plain text: {e}")
+        await update.message.reply_text(text, reply_markup=markup)
+
+async def show_receipt_preview(update, context):
+    receipt = context.user_data.get('receipt', {})
+    await send_receipt_preview_message(update, receipt)
+    return RECEIPT_TARGET
+
+async def receipt_docnum_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User typed the invoice/receipt/check number after tapping '🔖 Додати № документа'"""
+    text = (update.message.text or '').strip()
+    receipt = context.user_data.get('receipt', {})
+    receipt['docNumber'] = text
+    context.user_data['receipt'] = receipt
+    await send_receipt_preview_message(update, receipt)
     return RECEIPT_TARGET
 
 async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,6 +1038,10 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ Скасовано")
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
+
+    if data == 'rec_docnum':
+        await query.edit_message_text("🔖 Введіть номер накладної / рахунку / чека (текстом):")
+        return RECEIPT_CONFIRM
 
     if data == 'rec_stock':
         # Save to matStock
@@ -1028,7 +1075,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'qty': item.get('qty', 0),
                     'price': item.get('price', 0),
                     'date': receipt.get('date') or today_str(),
-                    'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}"
+                    'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}"
                 })
             saved += 1
 
@@ -1067,7 +1114,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                 'currency': 'UAH',
                 'rate': 1,
                 'serial': '',
-                'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}",
+                'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}",
             })
             if doc_id:
                 saved += 1
@@ -1100,7 +1147,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             'date': receipt.get('date') or today_str(),
             'objId': obj_id,
             'objName': obj['name'] if obj else '',
-            'desc': f"Закупівля: {receipt.get('supplier','')}",
+            'desc': f"Закупівля: {receipt.get('supplier','')}{doc_number_suffix(receipt)}",
             'workers': [],
             'transport': [],
             'materials': [
@@ -1603,6 +1650,43 @@ async def morning_plan_digest(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Morning digest send error: {e}")
 
+async def meeting_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """Двічі на день (о 9:00 і о 18:00) нагадує про заплановані зустрічі на
+    найближчі 2 дні. Нагадування само зупиняється, щойно дата зустрічі мине
+    або зустріч видалять (скасують) у програмі — окремого статусу 'скасовано'
+    не потрібно, досить прибрати зустріч зі "Зустрічі" у веб-додатку."""
+    settings = fb_get_all('settings')
+    admin = next((s for s in settings if s['id'] == 'admin'), None)
+    if not admin or not admin.get('chat_id'):
+        return
+    today = date.today()
+    upcoming = []
+    for m in fb_get_all('meetings'):
+        d = m.get('date')
+        if not d:
+            continue
+        try:
+            md = datetime.strptime(d, '%Y-%m-%d').date()
+        except ValueError:
+            continue
+        delta = (md - today).days
+        if 0 <= delta <= 2:
+            upcoming.append((delta, m))
+    if not upcoming:
+        return
+    upcoming.sort(key=lambda x: (x[0], x[1].get('time') or '99:99'))
+    lines = ["🔔 *Нагадування про заплановані зустрічі:*\n"]
+    for delta, m in upcoming:
+        when = "сьогодні" if delta == 0 else ("завтра" if delta == 1 else fmt_date(m.get('date', '')))
+        t = f" о {m['time']}" if m.get('time') else ""
+        place = f" · {m['place']}" if m.get('place') else ""
+        lines.append(f"🤝 {when}{t} — {m.get('name', '')}{place}")
+    lines.append("\n_Якщо зустріч скасована — видаліть її в програмі (розділ «Зустрічі»), і нагадування припиняться._")
+    try:
+        await context.bot.send_message(chat_id=admin['chat_id'], text="\n".join(lines), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Meeting reminder send error: {e}")
+
 async def send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
     """Формує JSON-резервну копію всіх колекцій Firestore і надсилає документом у Telegram."""
     if not db:
@@ -1887,6 +1971,9 @@ def main():
             RECEIPT_PHOTO: [
                 MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), receipt_photo),
             ],
+            RECEIPT_CONFIRM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_docnum_handler),
+            ],
             RECEIPT_TARGET: [
                 CallbackQueryHandler(receipt_target_callback, pattern='^rec'),
             ],
@@ -1942,6 +2029,8 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
         app.job_queue.run_daily(morning_plan_digest, time=dtime(hour=8, minute=0))
+        app.job_queue.run_daily(meeting_reminder_job, time=dtime(hour=9, minute=0))
+        app.job_queue.run_daily(meeting_reminder_job, time=dtime(hour=18, minute=0))
         app.job_queue.run_daily(daily_backup_job, time=dtime(hour=2, minute=0))
         app.job_queue.run_repeating(sync_sheets_job, interval=900, first=60)
     else:
