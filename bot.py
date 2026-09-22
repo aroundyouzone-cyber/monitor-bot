@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import json
 import logging
 import base64
@@ -963,20 +964,29 @@ def doc_number_suffix(receipt):
     num = (receipt.get('docNumber') or '').strip()
     return f" · № {num}" if num else ""
 
+def md_safe(text):
+    """Strip characters that break Telegram's legacy Markdown parser (*_`[) when interpolating
+    arbitrary OCR-recognized text (item names, supplier, doc numbers) into a Markdown message.
+    Without this, a product name like 'D65*45' crashes the whole preview with
+    'Can't parse entities' and the bot looks unresponsive."""
+    if not text:
+        return text
+    return re.sub(r'[*_`\[\]]', '', str(text))
+
 def build_receipt_preview_text(receipt):
     items = receipt.get('items', [])
 
     text = "🧾 *Розпізнано:*\n\n"
     if receipt.get('supplier'):
-        text += f"🏪 {receipt['supplier']}\n"
+        text += f"🏪 {md_safe(receipt['supplier'])}\n"
     if receipt.get('date'):
         text += f"📅 {fmt_date(receipt['date'])}\n"
     if receipt.get('docNumber'):
-        text += f"🔖 № {receipt['docNumber']}\n"
+        text += f"🔖 № {md_safe(receipt['docNumber'])}\n"
     text += "\n"
 
     for item in items:
-        text += f"• {item['name']} — {item['qty']} {item.get('unit','шт')} × {fmt_money(item.get('price',0))} = {fmt_money(item.get('amount',0))}\n"
+        text += f"• {md_safe(item['name'])} — {item['qty']} {item.get('unit','шт')} × {fmt_money(item.get('price',0))} = {fmt_money(item.get('amount',0))}\n"
 
     if receipt.get('total'):
         text += f"\n💰 *Разом: {fmt_money(receipt['total'])}*"
@@ -994,11 +1004,20 @@ def receipt_preview_buttons(receipt):
         [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
     ]
 
+async def send_receipt_preview_message(update, receipt):
+    """Send the receipt preview, falling back to plain text if Markdown parsing still fails
+    for some unforeseen character in OCR'd text — better a plain message than a silent crash."""
+    text = build_receipt_preview_text(receipt)
+    markup = InlineKeyboardMarkup(receipt_preview_buttons(receipt))
+    try:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=markup)
+    except Exception as e:
+        logger.error(f"Receipt preview Markdown error, resending as plain text: {e}")
+        await update.message.reply_text(text, reply_markup=markup)
+
 async def show_receipt_preview(update, context):
     receipt = context.user_data.get('receipt', {})
-    text = build_receipt_preview_text(receipt)
-    await update.message.reply_text(text, parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(receipt_preview_buttons(receipt)))
+    await send_receipt_preview_message(update, receipt)
     return RECEIPT_TARGET
 
 async def receipt_docnum_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1007,8 +1026,7 @@ async def receipt_docnum_handler(update: Update, context: ContextTypes.DEFAULT_T
     receipt = context.user_data.get('receipt', {})
     receipt['docNumber'] = text
     context.user_data['receipt'] = receipt
-    await update.message.reply_text(build_receipt_preview_text(receipt), parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(receipt_preview_buttons(receipt)))
+    await send_receipt_preview_message(update, receipt)
     return RECEIPT_TARGET
 
 async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
