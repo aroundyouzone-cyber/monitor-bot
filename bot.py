@@ -973,6 +973,28 @@ def md_safe(text):
         return text
     return re.sub(r'[*_`\[\]]', '', str(text))
 
+def ensure_supplier(name):
+    """Make sure a supplier with this name exists in the 'suppliers' collection (used by the
+    web app's 'Постачальники' page), so a name recognized from a receipt shows up there too —
+    not just as free text on the stock-move/purchase/daily-log record. Case-insensitive match
+    by name; creates a minimal record if none exists yet. Returns the supplier id, or '' if
+    the name is blank or the write failed."""
+    name = (name or '').strip()
+    if not name:
+        return ''
+    try:
+        existing = fb_get_all('suppliers')
+        for s in existing:
+            if (s.get('name') or '').strip().lower() == name.lower():
+                return s.get('id', '')
+        return fb_add('suppliers', {
+            'name': name, 'contact': '', 'phone': '',
+            'note': 'Додано автоматично з чека (бот)'
+        }) or ''
+    except Exception as e:
+        logger.error(f"ensure_supplier error: {e}")
+        return ''
+
 def build_receipt_preview_text(receipt):
     items = receipt.get('items', [])
 
@@ -1046,6 +1068,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
     if data == 'rec_stock':
         # Save to matStock
         receipt = context.user_data.get('receipt', {})
+        supplier_id = ensure_supplier(receipt.get('supplier', ''))
         saved = 0
         for item in receipt.get('items', []):
             existing = None
@@ -1057,6 +1080,8 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
 
             if existing:
                 existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
+                if supplier_id and not existing.get('supplierId'):
+                    existing['supplierId'] = supplier_id
                 fb_set('matStock', existing['id'], existing)
                 mat_id = existing['id']
             else:
@@ -1066,6 +1091,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'unit': item.get('unit', 'шт'),
                     'price': item.get('price', 0),
                     'supplier': receipt.get('supplier', ''),
+                    'supplierId': supplier_id,
                     'min': 0, 'cat': '', 'sku': '', 'note': ''
                 })
             if mat_id:
@@ -1099,6 +1125,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         category = data.replace('reccat_', '')
         cat_labels = {'materials': '📦 Матеріали', 'delivery': '🚚 Доставка', 'transport': '🚗 Транспорт', 'other': '📎 Інше'}
         receipt = context.user_data.get('receipt', {})
+        ensure_supplier(receipt.get('supplier', ''))
         saved = 0
         for item in receipt.get('items', []):
             doc_id = fb_add('purchases', {
@@ -1141,25 +1168,73 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         objects = get_objects()
         obj = next((o for o in objects if o['id'] == obj_id), None)
         receipt = context.user_data.get('receipt', {})
+        supplier_id = ensure_supplier(receipt.get('supplier', ''))
+        log_date = receipt.get('date') or today_str()
+
+        # Route each material through the склад: first "приход" (add/create in matStock,
+        # same as 📦 На склад), then immediately "списання" of the same qty onto this object
+        # (a stockMoves 'out', linked via stockId/stockMoveId). Net stock stays unchanged, but
+        # the full delivery→usage trail is visible in "Історія руху складу", and if the
+        # web-app user later edits this daily-report entry (e.g. some material had leftovers),
+        # the existing edit-log logic rolls back this exact stockMove and returns the leftover
+        # qty to склад automatically.
+        materials = []
+        for item in receipt.get('items', []):
+            qty = item.get('qty', 0)
+            existing = None
+            stocks = fb_get_all('matStock')
+            for s in stocks:
+                if s.get('name', '').lower() == item['name'].lower():
+                    existing = s
+                    break
+
+            if existing:
+                existing['qty'] = existing.get('qty', 0) + qty
+                if supplier_id and not existing.get('supplierId'):
+                    existing['supplierId'] = supplier_id
+                fb_set('matStock', existing['id'], existing)
+                mat_id = existing['id']
+            else:
+                mat_id = fb_add('matStock', {
+                    'name': item['name'],
+                    'qty': qty,
+                    'unit': item.get('unit', 'шт'),
+                    'price': item.get('price', 0),
+                    'supplier': receipt.get('supplier', ''),
+                    'supplierId': supplier_id,
+                    'min': 0, 'cat': '', 'sku': '', 'note': ''
+                })
+
+            material = {
+                'name': item['name'],
+                'qty': qty,
+                'unit': item.get('unit', 'шт'),
+                'price': item.get('price', 0),
+                'sku': ''
+            }
+            if mat_id:
+                move_id = fb_add('stockMoves', {
+                    'matId': mat_id,
+                    'type': 'out',
+                    'qty': qty,
+                    'price': item.get('price', 0),
+                    'date': log_date,
+                    'note': f"Щоденний звіт · {obj['name'] if obj else ''}"
+                })
+                if move_id:
+                    material['stockId'] = mat_id
+                    material['stockMoveId'] = move_id
+            materials.append(material)
 
         # Create daily log with materials
         log = {
-            'date': receipt.get('date') or today_str(),
+            'date': log_date,
             'objId': obj_id,
             'objName': obj['name'] if obj else '',
             'desc': f"Закупівля: {receipt.get('supplier','')}{doc_number_suffix(receipt)}",
             'workers': [],
             'transport': [],
-            'materials': [
-                {
-                    'name': item['name'],
-                    'qty': item.get('qty', 0),
-                    'unit': item.get('unit', 'шт'),
-                    'price': item.get('price', 0),
-                    'sku': ''
-                }
-                for item in receipt.get('items', [])
-            ]
+            'materials': materials,
         }
         doc_id = fb_add('dailyLogs', log)
 
