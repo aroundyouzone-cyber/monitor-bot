@@ -1,58 +1,4 @@
-"""
-🤖 Моніторинг Виробництва — Telegram Бот
-Вносить щоденні звіти, чеки, накладні прямо з Telegram
-Зберігає дані у Firebase (той самий що й веб-програма)
-"""
-
-import os
-import json
-import logging
-import base64
-import csv
-import io
-import urllib.request
-import urllib.error
-from datetime import datetime, date, timedelta, time as dtime
-from io import BytesIO
-
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-)
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes
-)
-import firebase_admin
-from firebase_admin import credentials, firestore
-
-# ── Anthropic для розпізнавання чеків ────────────────────────
-try:
-    import google.generativeai as genai
-    CLAUDE_AVAILABLE = True
-except ImportError:
-    CLAUDE_AVAILABLE = False
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ── КОНФІГУРАЦІЯ (задається через змінні середовища) ─────────
-BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
-FIREBASE_KEY = os.environ.get('FIREBASE_KEY', '')   # JSON рядок з ключем Firebase
-CLAUDE_KEY   = os.environ.get('GEMINI_API_KEY', '')
-
-# ── СИНХРОНІЗАЦІЯ З GOOGLE-ТАБЛИЦЕЮ "Облік_продажу" ───────────
-SHEET_ID          = os.environ.get('SHEET_ID', '1LUB5jakppvWBo9MQN2ouRM7HKao4dv9MpDkKWsRWh0Y')
-SHEET_GID_PURCHASES = os.environ.get('SHEET_GID_PURCHASES', '416162921')   # аркуш "Закупки"
-SHEET_GID_SALES      = os.environ.get('SHEET_GID_SALES', '1456202155')     # аркуш "Продажі"
-
-# ── ДОСТУП (задається через змінні середовища) ────────────────
-# ALLOWED_USER_IDS: через кому, напр. "123456789,987654321"
-# OWNER_ID: власник (може видаляти записи). Якщо не задано — перший з ALLOWED_USER_IDS
-ALLOWED_IDS = [i.strip() for i in os.environ.get('ALLOWED_USER_IDS', '').split(',') if i.strip()]
-OWNER_ID    = os.environ.get('OWNER_ID', '') or (ALLOWED_IDS[0] if ALLOWED_IDS else '')
-
-def is_allowed(user_id):
+ f is_allowed(user_id):
     """Якщо ALLOWED_USER_IDS не задано — доступ відкритий (для першого налаштування)"""
     if not ALLOWED_IDS:
         return True
@@ -63,7 +9,7 @@ def is_owner(user_id):
 
 # ── СТАНИ РОЗМОВИ ─────────────────────────────────────────────
 (
-    MAIN_MENU,
+    MAIN_MENU, 
     SELECT_OBJECT, SELECT_DATE,
     DAILY_WORKERS, DAILY_MATERIALS, DAILY_TRANSPORT, DAILY_DESC, DAILY_CONFIRM,
     RECEIPT_PHOTO, RECEIPT_CONFIRM, RECEIPT_TARGET,
@@ -844,7 +790,8 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🧾 *Фото чека або накладної*\n\n"
-        "Надішліть фото документу — бот розпізнає матеріали і суму автоматично.\n\n"
+        "Надішліть фото документу — бот розпізнає матеріали, суму і номер документа (чека/накладної/рахунка) автоматично. "
+        "Якщо номер не розпізнався або його треба виправити — на наступному кроці буде кнопка \"🔖 Додати/Змінити № документа\".\n\n"
         "Або введіть вручну у форматі:\n"
         "`Назва матеріалу кількість одиниця ціна`\n"
         "Наприклад: `Кабель ВВГ 50 м 38`",
@@ -880,6 +827,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {
   "supplier": "назва магазину/постачальника",
   "date": "дата YYYY-MM-DD або null",
+  "docNumber": "номер документу (номер чека, номер або серія накладної, номер рахунку/фактури) або null, якщо не вказано",
   "total": 1234.50,
   "items": [
     {"name": "назва товару", "qty": 2, "unit": "шт", "price": 150.0, "amount": 300.0}
@@ -956,8 +904,12 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return RECEIPT_PHOTO
 
-async def show_receipt_preview(update, context):
-    receipt = context.user_data.get('receipt', {})
+def doc_number_suffix(receipt):
+    """' · № 12345' if the receipt/invoice number was recognized or entered, else ''"""
+    num = (receipt.get('docNumber') or '').strip()
+    return f" · № {num}" if num else ""
+
+def build_receipt_preview_text(receipt):
     items = receipt.get('items', [])
 
     text = "🧾 *Розпізнано:*\n\n"
@@ -965,6 +917,8 @@ async def show_receipt_preview(update, context):
         text += f"🏪 {receipt['supplier']}\n"
     if receipt.get('date'):
         text += f"📅 {fmt_date(receipt['date'])}\n"
+    if receipt.get('docNumber'):
+        text += f"🔖 № {receipt['docNumber']}\n"
     text += "\n"
 
     for item in items:
@@ -974,16 +928,33 @@ async def show_receipt_preview(update, context):
         text += f"\n💰 *Разом: {fmt_money(receipt['total'])}*"
 
     text += "\n\nКуди записати?"
+    return text
 
-    buttons = [
+def receipt_preview_buttons(receipt):
+    docnum_label = "🔖 Змінити № документа" if receipt.get('docNumber') else "🔖 Додати № документа"
+    return [
         [InlineKeyboardButton("📦 На склад", callback_data="rec_stock"),
          InlineKeyboardButton("🏗️ На об'єкт", callback_data="rec_object")],
         [InlineKeyboardButton("🧾 В Закупки (без складу)", callback_data="rec_purchase")],
+        [InlineKeyboardButton(docnum_label, callback_data="rec_docnum")],
         [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
     ]
 
+async def show_receipt_preview(update, context):
+    receipt = context.user_data.get('receipt', {})
+    text = build_receipt_preview_text(receipt)
     await update.message.reply_text(text, parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(buttons))
+        reply_markup=InlineKeyboardMarkup(receipt_preview_buttons(receipt)))
+    return RECEIPT_TARGET
+
+async def receipt_docnum_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User typed the invoice/receipt/check number after tapping '🔖 Додати № документа'"""
+    text = (update.message.text or '').strip()
+    receipt = context.user_data.get('receipt', {})
+    receipt['docNumber'] = text
+    context.user_data['receipt'] = receipt
+    await update.message.reply_text(build_receipt_preview_text(receipt), parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(receipt_preview_buttons(receipt)))
     return RECEIPT_TARGET
 
 async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,6 +966,10 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ Скасовано")
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
+
+    if data == 'rec_docnum':
+        await query.edit_message_text("🔖 Введіть номер накладної / рахунку / чека (текстом):")
+        return RECEIPT_CONFIRM
 
     if data == 'rec_stock':
         # Save to matStock
@@ -1028,7 +1003,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'qty': item.get('qty', 0),
                     'price': item.get('price', 0),
                     'date': receipt.get('date') or today_str(),
-                    'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}"
+                    'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}"
                 })
             saved += 1
 
@@ -1067,7 +1042,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                 'currency': 'UAH',
                 'rate': 1,
                 'serial': '',
-                'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}",
+                'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}",
             })
             if doc_id:
                 saved += 1
@@ -1100,7 +1075,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             'date': receipt.get('date') or today_str(),
             'objId': obj_id,
             'objName': obj['name'] if obj else '',
-            'desc': f"Закупівля: {receipt.get('supplier','')}",
+            'desc': f"Закупівля: {receipt.get('supplier','')}{doc_number_suffix(receipt)}",
             'workers': [],
             'transport': [],
             'materials': [
@@ -1923,6 +1898,9 @@ def main():
             ],
             RECEIPT_PHOTO: [
                 MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), receipt_photo),
+            ],
+            RECEIPT_CONFIRM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_docnum_handler),
             ],
             RECEIPT_TARGET: [
                 CallbackQueryHandler(receipt_target_callback, pattern='^rec'),
