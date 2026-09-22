@@ -1,4 +1,58 @@
- f is_allowed(user_id):
+"""
+🤖 Моніторинг Виробництва — Telegram Бот
+Вносить щоденні звіти, чеки, накладні прямо з Telegram
+Зберігає дані у Firebase (той самий що й веб-програма)
+"""
+
+import os
+import json
+import logging
+import base64
+import csv
+import io
+import urllib.request
+import urllib.error
+from datetime import datetime, date, timedelta, time as dtime
+from io import BytesIO
+
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+)
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ConversationHandler, filters, ContextTypes
+)
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# ── Anthropic для розпізнавання чеків ────────────────────────
+try:
+    import google.generativeai as genai
+    CLAUDE_AVAILABLE = True
+except ImportError:
+    CLAUDE_AVAILABLE = False
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ── КОНФІГУРАЦІЯ (задається через змінні середовища) ─────────
+BOT_TOKEN    = os.environ.get('BOT_TOKEN', '')
+FIREBASE_KEY = os.environ.get('FIREBASE_KEY', '')   # JSON рядок з ключем Firebase
+CLAUDE_KEY   = os.environ.get('GEMINI_API_KEY', '')
+
+# ── СИНХРОНІЗАЦІЯ З GOOGLE-ТАБЛИЦЕЮ "Облік_продажу" ───────────
+SHEET_ID          = os.environ.get('SHEET_ID', '1LUB5jakppvWBo9MQN2ouRM7HKao4dv9MpDkKWsRWh0Y')
+SHEET_GID_PURCHASES = os.environ.get('SHEET_GID_PURCHASES', '416162921')   # аркуш "Закупки"
+SHEET_GID_SALES      = os.environ.get('SHEET_GID_SALES', '1456202155')     # аркуш "Продажі"
+
+# ── ДОСТУП (задається через змінні середовища) ────────────────
+# ALLOWED_USER_IDS: через кому, напр. "123456789,987654321"
+# OWNER_ID: власник (може видаляти записи). Якщо не задано — перший з ALLOWED_USER_IDS
+ALLOWED_IDS = [i.strip() for i in os.environ.get('ALLOWED_USER_IDS', '').split(',') if i.strip()]
+OWNER_ID    = os.environ.get('OWNER_ID', '') or (ALLOWED_IDS[0] if ALLOWED_IDS else '')
+
+def is_allowed(user_id):
     """Якщо ALLOWED_USER_IDS не задано — доступ відкритий (для першого налаштування)"""
     if not ALLOWED_IDS:
         return True
@@ -9,7 +63,7 @@ def is_owner(user_id):
 
 # ── СТАНИ РОЗМОВИ ─────────────────────────────────────────────
 (
-    MAIN_MENU, 
+    MAIN_MENU,
     SELECT_OBJECT, SELECT_DATE,
     DAILY_WORKERS, DAILY_MATERIALS, DAILY_TRANSPORT, DAILY_DESC, DAILY_CONFIRM,
     RECEIPT_PHOTO, RECEIPT_CONFIRM, RECEIPT_TARGET,
