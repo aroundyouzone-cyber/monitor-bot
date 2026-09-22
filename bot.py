@@ -1603,6 +1603,43 @@ async def morning_plan_digest(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Morning digest send error: {e}")
 
+async def meeting_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """Двічі на день (о 9:00 і о 18:00) нагадує про заплановані зустрічі на
+    найближчі 2 дні. Нагадування само зупиняється, щойно дата зустрічі мине
+    або зустріч видалять (скасують) у програмі — окремого статусу 'скасовано'
+    не потрібно, досить прибрати зустріч зі "Зустрічі" у веб-додатку."""
+    settings = fb_get_all('settings')
+    admin = next((s for s in settings if s['id'] == 'admin'), None)
+    if not admin or not admin.get('chat_id'):
+        return
+    today = date.today()
+    upcoming = []
+    for m in fb_get_all('meetings'):
+        d = m.get('date')
+        if not d:
+            continue
+        try:
+            md = datetime.strptime(d, '%Y-%m-%d').date()
+        except ValueError:
+            continue
+        delta = (md - today).days
+        if 0 <= delta <= 2:
+            upcoming.append((delta, m))
+    if not upcoming:
+        return
+    upcoming.sort(key=lambda x: (x[0], x[1].get('time') or '99:99'))
+    lines = ["🔔 *Нагадування про заплановані зустрічі:*\n"]
+    for delta, m in upcoming:
+        when = "сьогодні" if delta == 0 else ("завтра" if delta == 1 else fmt_date(m.get('date', '')))
+        t = f" о {m['time']}" if m.get('time') else ""
+        place = f" · {m['place']}" if m.get('place') else ""
+        lines.append(f"🤝 {when}{t} — {m.get('name', '')}{place}")
+    lines.append("\n_Якщо зустріч скасована — видаліть її в програмі (розділ «Зустрічі»), і нагадування припиняться._")
+    try:
+        await context.bot.send_message(chat_id=admin['chat_id'], text="\n".join(lines), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Meeting reminder send error: {e}")
+
 async def send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
     """Формує JSON-резервну копію всіх колекцій Firestore і надсилає документом у Telegram."""
     if not db:
@@ -1942,6 +1979,8 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
         app.job_queue.run_daily(morning_plan_digest, time=dtime(hour=8, minute=0))
+        app.job_queue.run_daily(meeting_reminder_job, time=dtime(hour=9, minute=0))
+        app.job_queue.run_daily(meeting_reminder_job, time=dtime(hour=18, minute=0))
         app.job_queue.run_daily(daily_backup_job, time=dtime(hour=2, minute=0))
         app.job_queue.run_repeating(sync_sheets_job, interval=900, first=60)
     else:
