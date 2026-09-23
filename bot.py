@@ -12,6 +12,7 @@ import base64
 import csv
 import io
 import traceback
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, date, timedelta, time as dtime
@@ -25,7 +26,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, filters, ContextTypes, ExtBot
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Conflict
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -2135,6 +2136,11 @@ async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Reminder send error: {e}")
 
 # ── ГЛОБАЛЬНИЙ ОБРОБНИК ПОМИЛОК ────────────────────────────────
+# Мінімальний інтервал між сповіщеннями власнику про конфлікт опитування (див. нижче) —
+# щоб один редеплой (де конфлікт може спрацювати 2-3 рази поспіль за кілька секунд,
+# поки старий процес остаточно не зупиниться) не засипав Telegram однаковими нотатками.
+_last_conflict_alert_ts = 0.0
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Catches any exception that escapes a handler (Gemini/Firestore hiccup, malformed
     data, etc.) so a single failure never leaves the bot silently stuck for that user —
@@ -2142,6 +2148,33 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     "не працює" with screenshots. python-telegram-bot already keeps polling other updates
     when one handler raises; this just makes that failure visible and recoverable."""
     logger.error("Unhandled exception:", exc_info=context.error)
+
+    # "Conflict: terminated by other getUpdates request" фактично завжди означає одну
+    # й ту саму нешкідливу, самозагойну ситуацію: Railway ще на секунду-дві лишає старий
+    # процес живим (він саме встигає доопитати Telegram), поки новий після редеплою вже
+    # піднявся й теж почав опитувати. Це не помилка застосунку й не потребує жодної дії —
+    # старий процес сам завершується, і бот одразу працює далі. Раніше на кожен такий
+    # випадок (а їх під час одного редеплою буває 2-3) власнику летів повний Python-трейсбек,
+    # що виглядало як серйозна поломка, хоча бот насправді вже відновився. Тепер замість
+    # цього — одне спокійне повідомлення, не частіше ніж раз на 2 хвилини.
+    if isinstance(context.error, Conflict):
+        logger.warning("Transient polling conflict (self-resolves): %s", context.error)
+        global _last_conflict_alert_ts
+        now = time.monotonic()
+        if now - _last_conflict_alert_ts > 120:
+            _last_conflict_alert_ts = now
+            try:
+                settings = fb_get_all('settings')
+                admin = next((s for s in settings if s['id'] == 'admin'), None)
+                if admin and admin.get('chat_id'):
+                    await context.bot.send_message(
+                        chat_id=admin['chat_id'],
+                        text="🔄 Бот щойно перезапустився (оновлення на сервері) — "
+                             "за кілька секунд усе працює як зазвичай, окремо робити нічого не треба."
+                    )
+            except Exception as e:
+                logger.error(f"Conflict-notice send failed: {e}")
+        return
 
     # Let the user know something broke, instead of silence, and point them back to /start.
     try:
