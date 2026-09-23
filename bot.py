@@ -23,8 +23,9 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes
+    ConversationHandler, filters, ContextTypes, ExtBot
 )
+from telegram.error import BadRequest
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -965,6 +966,44 @@ def doc_number_suffix(receipt):
     num = (receipt.get('docNumber') or '').strip()
     return f" · № {num}" if num else ""
 
+def _patch_markdown_safety_net():
+    """Any message sent with parse_mode='Markdown' can contain arbitrary user/OCR-derived
+    text (material names, supplier names, notes...) with an unpaired *, _, ` or [ that
+    Telegram's legacy Markdown parser can't handle — it then rejects the WHOLE message with
+    BadRequest ("Can't parse entities"), and that one action looks like the bot "doesn't
+    respond". md_safe() covers the couple of spots it's applied to, but this file sends
+    Markdown from 30+ places and it's easy to miss one — confirmed 23.09.2026, when the exact
+    same class of bug hit "📦 Склад" (show_stock), a spot md_safe() was never added to.
+    Instead of chasing every call site by hand, patch Telegram's send/edit methods ONCE:
+    on this specific error, retry the same call as plain text instead of failing outright.
+    This is a safety net, not a replacement for md_safe() — plain text still isn't as nice
+    as formatted text, but it always gets delivered."""
+    orig_send_message = ExtBot.send_message
+    orig_edit_message_text = ExtBot.edit_message_text
+
+    async def safe_send_message(self, *args, **kwargs):
+        try:
+            return await orig_send_message(self, *args, **kwargs)
+        except BadRequest as e:
+            if kwargs.get('parse_mode') and "Can't parse entities" in str(e):
+                logger.error(f"Markdown parse error on send_message, retrying as plain text: {e}")
+                kwargs['parse_mode'] = None
+                return await orig_send_message(self, *args, **kwargs)
+            raise
+
+    async def safe_edit_message_text(self, *args, **kwargs):
+        try:
+            return await orig_edit_message_text(self, *args, **kwargs)
+        except BadRequest as e:
+            if kwargs.get('parse_mode') and "Can't parse entities" in str(e):
+                logger.error(f"Markdown parse error on edit_message_text, retrying as plain text: {e}")
+                kwargs['parse_mode'] = None
+                return await orig_edit_message_text(self, *args, **kwargs)
+            raise
+
+    ExtBot.send_message = safe_send_message
+    ExtBot.edit_message_text = safe_edit_message_text
+
 def md_safe(text):
     """Strip characters that break Telegram's legacy Markdown parser (*_`[) when interpolating
     arbitrary OCR-recognized text (item names, supplier, doc numbers) into a Markdown message.
@@ -1022,7 +1061,7 @@ def receipt_preview_buttons(receipt):
     return [
         [InlineKeyboardButton("📦 На склад", callback_data="rec_stock"),
          InlineKeyboardButton("🏗️ На об'єкт", callback_data="rec_object")],
-        [InlineKeyboardButton("🧾 В Закупки (без складу)", callback_data="rec_purchase")],
+        [InlineKeyboardButton("🧾 В Закупки", callback_data="rec_purchase")],
         [InlineKeyboardButton(docnum_label, callback_data="rec_docnum")],
         [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
     ]
@@ -1067,10 +1106,23 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         return RECEIPT_CONFIRM
 
     if data == 'rec_stock':
-        # Save to matStock
+        # "📦 На склад" — перш ніж записувати, питаємо, чи це звичайні матеріали (списуються),
+        # чи інструмент/спецодяг (видається працівнику й повертається) — та ж різниця, що й
+        # веб-програма робить чекбоксом у "➕ Матеріал"/"➕ Закупка" (matStock.cat = '' чи 'tool').
+        buttons = [
+            [InlineKeyboardButton("📦 Матеріали", callback_data="recstock_materials"),
+             InlineKeyboardButton("🛠️ Інструмент/спецодяг", callback_data="recstock_tool")],
+            [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
+        ]
+        await query.edit_message_text("Це звичайні матеріали чи інструмент/спецодяг?", reply_markup=InlineKeyboardMarkup(buttons))
+        return RECEIPT_TARGET
+
+    if data.startswith('recstock_'):
+        cat = 'tool' if data == 'recstock_tool' else ''  # '' — матеріал, 'tool' — інструмент/спецодяг
         receipt = context.user_data.get('receipt', {})
         supplier_id = ensure_supplier(receipt.get('supplier', ''))
         saved = 0
+        failed = []
         for item in receipt.get('items', []):
             existing = None
             stocks = fb_get_all('matStock')
@@ -1079,12 +1131,21 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     existing = s
                     break
 
+            # ok tracks whether the matStock write ITSELF succeeded — fb_set/fb_add already
+            # catch their own exceptions and return False/None on failure, but this branch
+            # used to ignore that and count the item as "saved" regardless (confirmed
+            # 23.09.2026: user added 2 items via 🧾, got "✅ Додано на склад: 2 позицій", but
+            # nothing showed up in the web app — the write had silently failed and the success
+            # message was a false positive). Now the count — and the message — reflect what
+            # actually reached Firestore.
             if existing:
                 existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
                 if supplier_id and not existing.get('supplierId'):
                     existing['supplierId'] = supplier_id
-                fb_set('matStock', existing['id'], existing)
-                mat_id = existing['id']
+                if cat:
+                    existing['cat'] = cat  # позначку інструменту не знімаємо автоматично назад
+                ok = fb_set('matStock', existing['id'], existing)
+                mat_id = existing['id'] if ok else None
             else:
                 mat_id = fb_add('matStock', {
                     'name': item['name'],
@@ -1093,7 +1154,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'price': item.get('price', 0),
                     'supplier': receipt.get('supplier', ''),
                     'supplierId': supplier_id,
-                    'min': 0, 'cat': '', 'sku': '', 'note': ''
+                    'min': 0, 'cat': cat, 'sku': '', 'note': ''
                 })
             if mat_id:
                 fb_add('stockMoves', {
@@ -1104,9 +1165,14 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'date': receipt.get('date') or today_str(),
                     'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}"
                 })
-            saved += 1
+                saved += 1
+            else:
+                failed.append(item.get('name', '?'))
 
-        await query.edit_message_text(f"✅ Додано на склад: {saved} позицій")
+        text = f"✅ Додано на склад ({'🛠️ інструмент/спецодяг' if cat else '📦 матеріали'}): {saved} позицій"
+        if failed:
+            text += f"\n❌ Не вдалося зберегти ({len(failed)}): {', '.join(md_safe(n) for n in failed)}\nСпробуйте ще раз через кілька хвилин або перевірте зв'язок з Firebase."
+        await query.edit_message_text(text)
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
@@ -1122,18 +1188,37 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Оберіть категорію закупівлі:", reply_markup=InlineKeyboardMarkup(buttons))
         return RECEIPT_TARGET
 
-    if data.startswith('reccat_'):
-        category = data.replace('reccat_', '')
+    if data == 'reccat_materials':
+        # Категорія "Матеріали" — єдина, що також іде на Склад (див. recpurmat_ нижче), тож
+        # перш ніж записувати, так само питаємо матеріал це чи інструмент/спецодяг.
+        buttons = [
+            [InlineKeyboardButton("📦 Матеріали", callback_data="recpurmat_materials"),
+             InlineKeyboardButton("🛠️ Інструмент/спецодяг", callback_data="recpurmat_tool")],
+            [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
+        ]
+        await query.edit_message_text("Це звичайні матеріали чи інструмент/спецодяг?", reply_markup=InlineKeyboardMarkup(buttons))
+        return RECEIPT_TARGET
+
+    if data.startswith('reccat_') or data.startswith('recpurmat_'):
+        if data.startswith('recpurmat_'):
+            category = 'materials'
+            cat = 'tool' if data == 'recpurmat_tool' else ''  # '' — матеріал, 'tool' — інструмент/спецодяг
+        else:
+            category = data.replace('reccat_', '')
+            cat = ''
         cat_labels = {'materials': '📦 Матеріали', 'delivery': '🚚 Доставка', 'transport': '🚗 Транспорт', 'other': '📎 Інше'}
         receipt = context.user_data.get('receipt', {})
-        ensure_supplier(receipt.get('supplier', ''))
+        supplier_id = ensure_supplier(receipt.get('supplier', ''))
         saved = 0
+        failed = []
+        stock_note = 0
         for item in receipt.get('items', []):
-            doc_id = fb_add('purchases', {
+            purchase = {
                 'name': item['name'],
                 'category': category,
                 'enterpriseId': '',
                 'supplier': receipt.get('supplier', ''),
+                'supplierId': supplier_id,
                 'supplierPhone': '',
                 'date': receipt.get('date') or today_str(),
                 'qty': item.get('qty', 0),
@@ -1143,11 +1228,49 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                 'rate': 1,
                 'serial': '',
                 'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}",
-            })
+            }
+            # "Матеріали" вважаємо фізичною позицією, яка реально йде на об'єкти — тож так само,
+            # як і при "📦 На склад", одразу поповнюємо matStock і лишаємо приходний stockMoves,
+            # щоб позиція одразу зʼявилась у "Зі складу" в Щоденному звіті (веб-програма робить
+            # те саме в savePurchase() для ручного додавання — тут та сама логіка для бота).
+            if category == 'materials':
+                stocks = fb_get_all('matStock')
+                existing = next((s for s in stocks if s.get('name', '').lower() == item['name'].lower()), None)
+                if existing:
+                    existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
+                    if supplier_id and not existing.get('supplierId'):
+                        existing['supplierId'] = supplier_id
+                    if cat:
+                        existing['cat'] = cat
+                    mat_id = existing['id'] if fb_set('matStock', existing['id'], existing) else None
+                else:
+                    mat_id = fb_add('matStock', {
+                        'name': item['name'], 'qty': item.get('qty', 0), 'unit': item.get('unit', 'шт'),
+                        'price': item.get('price', 0), 'supplier': receipt.get('supplier', ''),
+                        'supplierId': supplier_id, 'min': 0, 'cat': cat, 'sku': '', 'note': ''
+                    })
+                if mat_id:
+                    move_id = fb_add('stockMoves', {
+                        'matId': mat_id, 'type': 'in', 'qty': item.get('qty', 0), 'price': item.get('price', 0),
+                        'date': purchase['date'], 'note': f"Закупівля (бот) · {receipt.get('supplier','')}".strip(' ·')
+                    })
+                    if move_id:
+                        purchase['stockId'] = mat_id
+                        purchase['stockMoveId'] = move_id
+                        stock_note += 1
+
+            doc_id = fb_add('purchases', purchase)
             if doc_id:
                 saved += 1
+            else:
+                failed.append(item.get('name', '?'))
 
-        await query.edit_message_text(f"✅ Додано в Закупки ({cat_labels.get(category, category)}): {saved} позицій")
+        text = f"✅ Додано в Закупки ({cat_labels.get(category, category)}): {saved} позицій"
+        if category == 'materials' and stock_note:
+            text += f"\n📦 Також поповнено Склад ({'🛠️ інструмент/спецодяг' if cat else 'матеріали'}): {stock_note} поз."
+        if failed:
+            text += f"\n❌ Не вдалося зберегти ({len(failed)}): {', '.join(md_safe(n) for n in failed)}"
+        await query.edit_message_text(text)
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
@@ -1180,6 +1303,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         # the existing edit-log logic rolls back this exact stockMove and returns the leftover
         # qty to склад automatically.
         materials = []
+        stock_failed = []
         for item in receipt.get('items', []):
             qty = item.get('qty', 0)
             existing = None
@@ -1193,8 +1317,8 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                 existing['qty'] = existing.get('qty', 0) + qty
                 if supplier_id and not existing.get('supplierId'):
                     existing['supplierId'] = supplier_id
-                fb_set('matStock', existing['id'], existing)
-                mat_id = existing['id']
+                ok = fb_set('matStock', existing['id'], existing)
+                mat_id = existing['id'] if ok else None
             else:
                 mat_id = fb_add('matStock', {
                     'name': item['name'],
@@ -1225,6 +1349,12 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                 if move_id:
                     material['stockId'] = mat_id
                     material['stockMoveId'] = move_id
+            else:
+                # matStock write failed (Firestore hiccup) — the material still goes into the
+                # daily-report entry below (that's the record of what was used), but it has no
+                # stockId/stockMoveId, so it never touched склад and can't be auto-rolled-back
+                # later. Told to the user explicitly instead of silently under-counting stock.
+                stock_failed.append(item.get('name', '?'))
             materials.append(material)
 
         # Create daily log with materials
@@ -1240,11 +1370,13 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         doc_id = fb_add('dailyLogs', log)
 
         if doc_id:
-            await query.edit_message_text(
+            text = (
                 f"✅ Записано на об'єкт *{obj['name'] if obj else ''}*!\n"
-                f"Матеріалів: {len(log['materials'])} позицій",
-                parse_mode='Markdown'
+                f"Матеріалів: {len(log['materials'])} позицій"
             )
+            if stock_failed:
+                text += f"\n⚠️ Не вдалося оновити склад для: {', '.join(md_safe(n) for n in stock_failed)} (запис на об'єкт все одно збережено)"
+            await query.edit_message_text(text, parse_mode='Markdown')
         else:
             await query.edit_message_text("❌ Помилка збереження")
 
@@ -2041,6 +2173,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_firebase()
+    _patch_markdown_safety_net()
 
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN не задано!")
