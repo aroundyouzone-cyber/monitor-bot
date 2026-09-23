@@ -11,6 +11,7 @@ import logging
 import base64
 import csv
 import io
+import traceback
 import urllib.request
 import urllib.error
 from datetime import datetime, date, timedelta, time as dtime
@@ -2001,6 +2002,43 @@ async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Reminder send error: {e}")
 
+# ── ГЛОБАЛЬНИЙ ОБРОБНИК ПОМИЛОК ────────────────────────────────
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Catches any exception that escapes a handler (Gemini/Firestore hiccup, malformed
+    data, etc.) so a single failure never leaves the bot silently stuck for that user —
+    and so the owner finds out immediately instead of only after the user reports
+    "не працює" with screenshots. python-telegram-bot already keeps polling other updates
+    when one handler raises; this just makes that failure visible and recoverable."""
+    logger.error("Unhandled exception:", exc_info=context.error)
+
+    # Let the user know something broke, instead of silence, and point them back to /start.
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ Сталася технічна помилка. Спробуйте ще раз або надішліть /start.",
+                reply_markup=main_keyboard()
+            )
+    except Exception as e:
+        logger.error(f"Error-handler reply failed: {e}")
+
+    # Alert the admin with the traceback so problems get noticed without the user reporting them.
+    # Sent WITHOUT parse_mode (plain text) — a raw traceback is full of underscores, brackets
+    # and asterisks that would either break Telegram's Markdown parser or get mangled by
+    # md_safe(), and here the exact, unmodified text is the whole point.
+    try:
+        settings = fb_get_all('settings')
+        admin = next((s for s in settings if s['id'] == 'admin'), None)
+        if admin and admin.get('chat_id'):
+            tb = ''.join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__))
+            if len(tb) > 3500:
+                tb = tb[-3500:]
+            await context.bot.send_message(
+                chat_id=admin['chat_id'],
+                text=f"🐛 Помилка в боті:\n\n{tb}"
+            )
+    except Exception as e:
+        logger.error(f"Error-handler admin alert failed: {e}")
+
 def main():
     init_firebase()
 
@@ -2012,7 +2050,17 @@ def main():
 
     # Conversation handler
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        # Conversation state lives only in memory (no persistence configured), so every
+        # deploy/restart wipes it for all users. Without a broad entry point, a user whose
+        # state was wiped taps a menu button or /cancel and gets silence — nothing matches
+        # entry_points (only /start did), and fallbacks only fire for chats PTB still thinks
+        # are "in conversation". Catching /cancel and any plain text here too makes the bot
+        # self-heal on the very next tap after a restart, instead of requiring /start by hand.
+        entry_points=[
+            CommandHandler('start', start),
+            CommandHandler('cancel', start),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, start),
+        ],
         states={
             MAIN_MENU: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
@@ -2100,6 +2148,8 @@ def main():
     app.add_handler(CommandHandler('backup', backup_command))
     # Ручна синхронізація з Google-таблицею на вимогу
     app.add_handler(CommandHandler('syncsheets', sync_sheets_command))
+    # Глобальний обробник помилок — жодна помилка не лишає бота мовчки "завислим"
+    app.add_error_handler(error_handler)
 
     if app.job_queue:
         app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
