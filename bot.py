@@ -223,7 +223,9 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data.clear()  # Очищуємо дані про промежуточні стани
-    await query.edit_message_text(
+    # Відправити НОВУ повідомлення з основною клавіатурою (reply keyboard)
+    # замість редагування (неможливо змішувати inline та reply keyboards)
+    await query.message.reply_text(
         "👋 Повернулися на головне меню. Обери дію:",
         reply_markup=main_keyboard()
     )
