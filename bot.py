@@ -658,7 +658,7 @@ async def ask_materials_msg(update, context, via_callback=False):
     ]
     if added:
         buttons.append([InlineKeyboardButton("🔙 Видалити останній", callback_data="mat_undo")])
-    buttons.append([InlineKeyboardButton("↩️ Назад до робітників", callback_data="mat_back")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
 
     msg = text
     if via_callback and update.callback_query:
@@ -678,8 +678,6 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await ask_transport(update, context)
     if data == 'mat_skip_tr':
         return await confirm_daily(update, context)
-    if data == 'mat_back':
-        return await ask_workers_msg(update, context, via_callback=True)
     if data == 'mat_undo':
         if context.user_data['daily']['materials']:
             context.user_data['daily']['materials'].pop()
@@ -739,7 +737,7 @@ async def ask_transport_msg(update, context, via_callback=False):
         [InlineKeyboardButton("➕ Додати транспорт", callback_data="tr_add")],
         [InlineKeyboardButton("✅ Далі — Опис", callback_data="tr_done")],
         [InlineKeyboardButton("⏭ Без опису — Зберегти", callback_data="tr_save")],
-        [InlineKeyboardButton("↩️ Назад до матеріалів", callback_data="tr_back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
 
     msg = text
@@ -762,8 +760,6 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DAILY_DESC
     if data == 'tr_save':
         return await confirm_daily(update, context)
-    if data == 'tr_back':
-        return await ask_materials_msg(update, context, via_callback=True)
     if data == 'tr_add':
         await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):")
         context.user_data['awaiting'] = 'transport_name'
@@ -814,7 +810,7 @@ async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("✅ Зберегти", callback_data="daily_save"),
          InlineKeyboardButton("❌ Скасувати", callback_data="daily_cancel")],
-        [InlineKeyboardButton("↩️ Назад до транспорту", callback_data="daily_back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
 
     if update.callback_query:
@@ -833,9 +829,6 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("❌ Скасовано")
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
-
-    if query.data == 'daily_back':
-        return await ask_transport_msg(update, context, via_callback=True)
 
     if query.data == 'daily_save':
         daily = context.user_data['daily']
