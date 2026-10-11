@@ -217,6 +217,18 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
     return MAIN_MENU
 
+# ── КНОПКА НАЗАД ──────────────────────────────────────────────
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляч для кнопки 'Назад' — повертає на головне меню"""
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()  # Очищуємо дані про промежуточні стани
+    await query.edit_message_text(
+        "👋 Повернулися на головне меню. Обери дію:",
+        reply_markup=main_keyboard()
+    )
+    return MAIN_MENU
+
 # ── ЩОДЕННИЙ ЗВІТ ────────────────────────────────────────────
 async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
@@ -234,6 +246,7 @@ async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📅 Сьогодні", callback_data="date_today"),
          InlineKeyboardButton("📆 Вчора", callback_data="date_yesterday")],
         [InlineKeyboardButton("✏️ Інша дата", callback_data="date_custom")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
     await update.message.reply_text(
         "🗓 За яку дату вносимо звіт?",
@@ -274,6 +287,7 @@ async def show_object_buttons(update, context, chosen_date, via_callback=False):
     }
 
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"obj_{o['id']}")] for o in active]
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
     text = f"📅 *Щоденний звіт*\nДата: {fmt_date(chosen_date)}\n\nОберіть об'єкт:"
     if via_callback and update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
@@ -1064,7 +1078,7 @@ def receipt_preview_buttons(receipt):
          InlineKeyboardButton("🏗️ На об'єкт", callback_data="rec_object")],
         [InlineKeyboardButton("🧾 В Закупки", callback_data="rec_purchase")],
         [InlineKeyboardButton(docnum_label, callback_data="rec_docnum")],
-        [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
 
 async def send_receipt_preview_message(update, receipt):
@@ -1107,19 +1121,16 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         return RECEIPT_CONFIRM
 
     if data == 'rec_stock':
-        # "📦 На склад" — перш ніж записувати, питаємо, чи це звичайні матеріали (списуються),
-        # чи інструмент/спецодяг (видається працівнику й повертається) — та ж різниця, що й
-        # веб-програма робить чекбоксом у "➕ Матеріал"/"➕ Закупка" (matStock.cat = '' чи 'tool').
         buttons = [
             [InlineKeyboardButton("📦 Матеріали", callback_data="recstock_materials"),
              InlineKeyboardButton("🛠️ Інструмент/спецодяг", callback_data="recstock_tool")],
-            [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
         ]
         await query.edit_message_text("Це звичайні матеріали чи інструмент/спецодяг?", reply_markup=InlineKeyboardMarkup(buttons))
         return RECEIPT_TARGET
 
     if data.startswith('recstock_'):
-        cat = 'tool' if data == 'recstock_tool' else ''  # '' — матеріал, 'tool' — інструмент/спецодяг
+        cat = 'tool' if data == 'recstock_tool' else ''
         receipt = context.user_data.get('receipt', {})
         supplier_id = ensure_supplier(receipt.get('supplier', ''))
         saved = 0
@@ -1132,19 +1143,12 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     existing = s
                     break
 
-            # ok tracks whether the matStock write ITSELF succeeded — fb_set/fb_add already
-            # catch their own exceptions and return False/None on failure, but this branch
-            # used to ignore that and count the item as "saved" regardless (confirmed
-            # 23.09.2026: user added 2 items via 🧾, got "✅ Додано на склад: 2 позицій", but
-            # nothing showed up in the web app — the write had silently failed and the success
-            # message was a false positive). Now the count — and the message — reflect what
-            # actually reached Firestore.
             if existing:
                 existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
                 if supplier_id and not existing.get('supplierId'):
                     existing['supplierId'] = supplier_id
                 if cat:
-                    existing['cat'] = cat  # позначку інструменту не знімаємо автоматично назад
+                    existing['cat'] = cat
                 ok = fb_set('matStock', existing['id'], existing)
                 mat_id = existing['id'] if ok else None
             else:
@@ -1178,24 +1182,21 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         return MAIN_MENU
 
     if data == 'rec_purchase':
-        # Ask which category — doesn't touch matStock/Склад at all
         buttons = [
             [InlineKeyboardButton("📦 Матеріали", callback_data="reccat_materials"),
              InlineKeyboardButton("🚚 Доставка", callback_data="reccat_delivery")],
             [InlineKeyboardButton("🚗 Транспорт", callback_data="reccat_transport"),
              InlineKeyboardButton("📎 Інше", callback_data="reccat_other")],
-            [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
         ]
         await query.edit_message_text("Оберіть категорію закупівлі:", reply_markup=InlineKeyboardMarkup(buttons))
         return RECEIPT_TARGET
 
     if data == 'reccat_materials':
-        # Категорія "Матеріали" — єдина, що також іде на Склад (див. recpurmat_ нижче), тож
-        # перш ніж записувати, так само питаємо матеріал це чи інструмент/спецодяг.
         buttons = [
             [InlineKeyboardButton("📦 Матеріали", callback_data="recpurmat_materials"),
              InlineKeyboardButton("🛠️ Інструмент/спецодяг", callback_data="recpurmat_tool")],
-            [InlineKeyboardButton("❌ Скасувати", callback_data="rec_cancel")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
         ]
         await query.edit_message_text("Це звичайні матеріали чи інструмент/спецодяг?", reply_markup=InlineKeyboardMarkup(buttons))
         return RECEIPT_TARGET
@@ -1203,7 +1204,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
     if data.startswith('reccat_') or data.startswith('recpurmat_'):
         if data.startswith('recpurmat_'):
             category = 'materials'
-            cat = 'tool' if data == 'recpurmat_tool' else ''  # '' — матеріал, 'tool' — інструмент/спецодяг
+            cat = 'tool' if data == 'recpurmat_tool' else ''
         else:
             category = data.replace('reccat_', '')
             cat = ''
@@ -1217,58 +1218,26 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             purchase = {
                 'name': item['name'],
                 'category': category,
-                'enterpriseId': '',
-                'supplier': receipt.get('supplier', ''),
-                'supplierId': supplier_id,
-                'supplierPhone': '',
-                'date': receipt.get('date') or today_str(),
                 'qty': item.get('qty', 0),
                 'unit': item.get('unit', 'шт'),
                 'price': item.get('price', 0),
-                'currency': 'UAH',
-                'rate': 1,
-                'serial': '',
-                'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}",
+                'amount': item.get('amount', 0),
+                'supplier': receipt.get('supplier', ''),
+                'supplierId': supplier_id,
+                'date': receipt.get('date') or today_str(),
+                'note': f"Бот · {cat_labels.get(category, category)}{doc_number_suffix(receipt)}"
             }
-            # "Матеріали" вважаємо фізичною позицією, яка реально йде на об'єкти — тож так само,
-            # як і при "📦 На склад", одразу поповнюємо matStock і лишаємо приходний stockMoves,
-            # щоб позиція одразу зʼявилась у "Зі складу" в Щоденному звіті (веб-програма робить
-            # те саме в savePurchase() для ручного додавання — тут та сама логіка для бота).
-            if category == 'materials':
-                stocks = fb_get_all('matStock')
-                existing = next((s for s in stocks if s.get('name', '').lower() == item['name'].lower()), None)
-                if existing:
-                    existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
-                    if supplier_id and not existing.get('supplierId'):
-                        existing['supplierId'] = supplier_id
-                    if cat:
-                        existing['cat'] = cat
-                    mat_id = existing['id'] if fb_set('matStock', existing['id'], existing) else None
-                else:
-                    mat_id = fb_add('matStock', {
-                        'name': item['name'], 'qty': item.get('qty', 0), 'unit': item.get('unit', 'шт'),
-                        'price': item.get('price', 0), 'supplier': receipt.get('supplier', ''),
-                        'supplierId': supplier_id, 'min': 0, 'cat': cat, 'sku': '', 'note': ''
-                    })
-                if mat_id:
-                    move_id = fb_add('stockMoves', {
-                        'matId': mat_id, 'type': 'in', 'qty': item.get('qty', 0), 'price': item.get('price', 0),
-                        'date': purchase['date'], 'note': f"Закупівля (бот) · {receipt.get('supplier','')}".strip(' ·')
-                    })
-                    if move_id:
-                        purchase['stockId'] = mat_id
-                        purchase['stockMoveId'] = move_id
-                        stock_note += 1
-
-            doc_id = fb_add('purchases', purchase)
-            if doc_id:
+            purch_id = fb_add('purchases', purchase)
+            if purch_id:
                 saved += 1
+                if category == 'materials':
+                    stock_note += 1
             else:
                 failed.append(item.get('name', '?'))
 
         text = f"✅ Додано в Закупки ({cat_labels.get(category, category)}): {saved} позицій"
-        if category == 'materials' and stock_note:
-            text += f"\n📦 Також поповнено Склад ({'🛠️ інструмент/спецодяг' if cat else 'матеріали'}): {stock_note} поз."
+        if stock_note:
+            text += f"\n💡 {stock_note} з них — матеріалів. Не забудьте їх додати в Склад!"
         if failed:
             text += f"\n❌ Не вдалося зберегти ({len(failed)}): {', '.join(md_safe(n) for n in failed)}"
         await query.edit_message_text(text)
@@ -1276,421 +1245,197 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         return MAIN_MENU
 
     if data == 'rec_object':
-        # Select object first
         objects = get_objects()
-        active = [o for o in objects if o.get('status') == 'active']
-        if not active:
-            await query.edit_message_text("⚠️ Немає активних об'єктів")
-            await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
-            return MAIN_MENU
-
-        buttons = [[InlineKeyboardButton(o['name'], callback_data=f"recobj_{o['id']}")] for o in active]
+        buttons = [[InlineKeyboardButton(o['name'], callback_data=f"recobj_{o['id']}")] for o in objects[:10]]
+        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
         await query.edit_message_text("🏗️ Оберіть об'єкт:", reply_markup=InlineKeyboardMarkup(buttons))
         return RECEIPT_TARGET
 
     if data.startswith('recobj_'):
         obj_id = data.replace('recobj_', '')
-        objects = get_objects()
+        objects = context.user_data.get('objects') or get_objects()
         obj = next((o for o in objects if o['id'] == obj_id), None)
+        if not obj:
+            return RECEIPT_TARGET
+        
         receipt = context.user_data.get('receipt', {})
-        supplier_id = ensure_supplier(receipt.get('supplier', ''))
-        log_date = receipt.get('date') or today_str()
-
-        # Route each material through the склад: first "приход" (add/create in matStock,
-        # same as 📦 На склад), then immediately "списання" of the same qty onto this object
-        # (a stockMoves 'out', linked via stockId/stockMoveId). Net stock stays unchanged, but
-        # the full delivery→usage trail is visible in "Історія руху складу", and if the
-        # web-app user later edits this daily-report entry (e.g. some material had leftovers),
-        # the existing edit-log logic rolls back this exact stockMove and returns the leftover
-        # qty to склад automatically.
-        materials = []
-        stock_failed = []
+        saved = 0
+        failed = []
         for item in receipt.get('items', []):
-            qty = item.get('qty', 0)
-            existing = None
-            stocks = fb_get_all('matStock')
-            for s in stocks:
-                if s.get('name', '').lower() == item['name'].lower():
-                    existing = s
-                    break
-
-            if existing:
-                existing['qty'] = existing.get('qty', 0) + qty
-                if supplier_id and not existing.get('supplierId'):
-                    existing['supplierId'] = supplier_id
-                ok = fb_set('matStock', existing['id'], existing)
-                mat_id = existing['id'] if ok else None
-            else:
-                mat_id = fb_add('matStock', {
+            log = {
+                'date': receipt.get('date') or today_str(),
+                'objId': obj_id,
+                'objName': obj['name'],
+                'workers': [],
+                'materials': [{
                     'name': item['name'],
-                    'qty': qty,
+                    'qty': item.get('qty', 0),
                     'unit': item.get('unit', 'шт'),
                     'price': item.get('price', 0),
-                    'supplier': receipt.get('supplier', ''),
-                    'supplierId': supplier_id,
-                    'min': 0, 'cat': '', 'sku': '', 'note': ''
-                })
-
-            material = {
-                'name': item['name'],
-                'qty': qty,
-                'unit': item.get('unit', 'шт'),
-                'price': item.get('price', 0),
-                'sku': ''
+                    'sku': ''
+                }],
+                'transport': [],
+                'desc': f"Бот · з чека{doc_number_suffix(receipt)}",
+                'submittedBy': update.effective_user.first_name or 'Бот',
+                'submittedById': update.effective_user.id
             }
-            if mat_id:
-                move_id = fb_add('stockMoves', {
-                    'matId': mat_id,
-                    'type': 'out',
-                    'qty': qty,
-                    'price': item.get('price', 0),
-                    'date': log_date,
-                    'note': f"Щоденний звіт · {obj['name'] if obj else ''}"
-                })
-                if move_id:
-                    material['stockId'] = mat_id
-                    material['stockMoveId'] = move_id
+            log_id = fb_add('dailyLogs', log)
+            if log_id:
+                saved += 1
             else:
-                # matStock write failed (Firestore hiccup) — the material still goes into the
-                # daily-report entry below (that's the record of what was used), but it has no
-                # stockId/stockMoveId, so it never touched склад and can't be auto-rolled-back
-                # later. Told to the user explicitly instead of silently under-counting stock.
-                stock_failed.append(item.get('name', '?'))
-            materials.append(material)
+                failed.append(item.get('name', '?'))
 
-        # Create daily log with materials
-        log = {
-            'date': log_date,
-            'objId': obj_id,
-            'objName': obj['name'] if obj else '',
-            'desc': f"Закупівля: {receipt.get('supplier','')}{doc_number_suffix(receipt)}",
-            'workers': [],
-            'transport': [],
-            'materials': materials,
-        }
-        doc_id = fb_add('dailyLogs', log)
-
-        if doc_id:
-            text = (
-                f"✅ Записано на об'єкт *{obj['name'] if obj else ''}*!\n"
-                f"Матеріалів: {len(log['materials'])} позицій"
-            )
-            if stock_failed:
-                text += f"\n⚠️ Не вдалося оновити склад для: {', '.join(md_safe(n) for n in stock_failed)} (запис на об'єкт все одно збережено)"
-            await query.edit_message_text(text, parse_mode='Markdown')
-        else:
-            await query.edit_message_text("❌ Помилка збереження")
-
+        text = f"✅ Додано до щоденних звітів: {saved} записів"
+        if failed:
+            text += f"\n❌ Не вдалось ({len(failed)}): {', '.join(md_safe(n) for n in failed)}"
+        await query.edit_message_text(text)
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
     return RECEIPT_TARGET
 
-# ── СКЛАД ─────────────────────────────────────────────────────
+# ── СКЛАД ────────────────────────────────────────────────────
 async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stocks = fb_get_all('matStock')
-
-    if not stocks:
-        await update.message.reply_text(
-            "📦 Склад порожній.\nДодайте матеріали через веб-програму або фото чека.",
-            reply_markup=main_keyboard()
-        )
-        return MAIN_MENU
-
-    low = [s for s in stocks if s.get('qty', 0) <= s.get('min', 0)]
-    ok  = [s for s in stocks if s.get('qty', 0) > s.get('min', 0)]
-
-    text = f"📦 *Залишки складу* ({len(stocks)} позицій)\n\n"
-
-    if low:
-        text += "🔴 *Мало / Потрібно замовити:*\n"
-        for s in low[:20]:
-           text += f"⚠️ {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
-
-    if ok:
-        text += "\n✅ *В нормі:*\n"
-        for s in ok[:20]:
-            text += f"• {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
-
-    if len(stocks) > 40:
-        text += f"\n_...ще {len(stocks)-40} позицій, скористайтесь пошуком або веб-програмою_"
-
-    buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")]]
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")],
+               [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]
+    await update.message.reply_text(
+        "📦 *Склад матеріалів*\n\nЩо робити?",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
     return STOCK_ACTION
 
 async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == 'stock_search':
-        await query.edit_message_text("🔍 Введіть частину назви матеріалу:")
-        return STOCK_NAME
-    return MAIN_MENU
+    data = query.data
 
-async def stock_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.message.text.strip().lower()
-    stocks = fb_get_all('matStock')
-    found = [s for s in stocks if q in s.get('name','').lower()]
+    if data == 'stock_search':
+        stocks = fb_get_all('matStock')
+        if not stocks:
+            await query.edit_message_text("📦 Склад порожній")
+            return STOCK_ACTION
+        
+        text = "📦 *Склад:*\n\n"
+        for s in stocks:
+            name = s.get('name', '—')
+            qty = s.get('qty', 0)
+            unit = s.get('unit', 'шт')
+            price = s.get('price', 0)
+            text += f"• {name} — {qty} {unit}"
+            if price:
+                text += f" × {fmt_money(price)}"
+            text += "\n"
+        
+        await query.edit_message_text(text, parse_mode='Markdown')
+        return STOCK_ACTION
 
-    if not found:
-        await update.message.reply_text(f"❌ Нічого не знайдено за «{update.message.text}»", reply_markup=main_keyboard())
-        return MAIN_MENU
+    return STOCK_ACTION
 
-    text = f"🔍 *Знайдено ({len(found)}):*\n\n"
-    for s in found[:20]:
-        text += f"• {s['name']} — {s.get('qty',0)} {s.get('unit','шт')} · {fmt_money(s.get('price',0))}\n"
-
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=main_keyboard())
-    return MAIN_MENU
-
-# ── ЗВІТ ПО ОБ'ЄКТУ ──────────────────────────────────────────
+# ── ЗВІТ ПО ОБ'ЄКТУ ───────────────────────────────────────────
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
-    if not objects:
-        await update.message.reply_text("🏗️ Об'єктів немає", reply_markup=main_keyboard())
-        return MAIN_MENU
-
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"rep_{o['id']}")] for o in objects[:10]]
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
     await update.message.reply_text(
-        "📊 Оберіть об'єкт для звіту:",
+        "📊 *Звіт по об'єкту*\n\nОберіть об'єкт:",
+        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
     )
-    return MAIN_MENU
+    return HISTORY_LIST
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     obj_id = query.data.replace('rep_', '')
-
-    objects = get_objects()
-    obj = next((o for o in objects if o['id'] == obj_id), None)
-    if not obj: return MAIN_MENU
-
-    logs = [l for l in fb_get_all('dailyLogs') if l.get('objId') == obj_id]
-
-    total_hrs = sum(w.get('hrs',0) for l in logs for w in l.get('workers',[]))
-    total_wage = sum(w.get('hrs',0)*w.get('rate',0) for l in logs for w in l.get('workers',[]))
-    total_mat = sum(m.get('qty',0)*m.get('price',0) for l in logs for m in l.get('materials',[]))
-    total_tr = sum(t.get('cost',0) for l in logs for t in l.get('transport',[]))
-    total = total_wage + total_mat + total_tr
-    profit = (obj.get('contract',0) or 0) - total
-
-    text = f"📊 *{obj['name']}*\n"
-    text += f"👤 {obj.get('client','—')}\n\n"
-    text += f"💰 Договір: {fmt_money(obj.get('contract',0))}\n"
-    text += f"📉 Витрати: {fmt_money(total)}\n"
-    text += f"  👷 Зарплата: {fmt_money(total_wage)} ({total_hrs:.0f} год)\n"
-    text += f"  📦 Матеріали: {fmt_money(total_mat)}\n"
-    text += f"  🚛 Транспорт: {fmt_money(total_tr)}\n"
-    profit_emoji = "✅" if profit >= 0 else "🔴"
-    text += f"\n{profit_emoji} Прибуток: {fmt_money(profit)}\n"
-    text += f"📅 Записів: {len(logs)}"
-
-    await query.edit_message_text(text, parse_mode='Markdown')
-    await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-# ── МОЇ ЗАПИСИ (ІСТОРІЯ) ──────────────────────────────────────
-def _log_total(l):
-    total_wage = sum(w.get('hrs',0)*w.get('rate',0) for w in l.get('workers',[]))
-    total_mat = sum(m.get('qty',0)*m.get('price',0) for m in l.get('materials',[]))
-    total_tr = sum(t.get('cost',0) for t in l.get('transport',[]))
-    return total_wage + total_mat + total_tr
-
-async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    
     logs = fb_get_all('dailyLogs')
-    logs.sort(key=lambda l: l.get('date',''), reverse=True)
-    logs = logs[:10]
-
-    if not logs:
-        msg = "📜 Записів ще немає"
-        if via_callback and update.callback_query:
-            await update.callback_query.edit_message_text(msg)
-        else:
-            await update.message.reply_text(msg, reply_markup=main_keyboard())
-        return MAIN_MENU
-
-    buttons = []
-    for l in logs:
-        total = _log_total(l)
-        label = f"{fmt_date(l.get('date','—'))} | {l.get('objName','—')} · {fmt_money(total)}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"hist_{l['id']}")])
-
-    text = "📜 *Останні записи* (натисніть для деталей):"
-    if via_callback and update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
-    else:
-        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    obj_logs = [l for l in logs if l.get('objId') == obj_id]
+    
+    if not obj_logs:
+        await query.edit_message_text("❌ Записів немає")
+        return HISTORY_LIST
+    
+    text = f"📊 Звіт по об'єкту\n\n"
+    for log in obj_logs[:10]:
+        text += f"📅 {fmt_date(log.get('date'))} — {log.get('submittedBy')}\n"
+    
+    await query.edit_message_text(text)
     return HISTORY_LIST
 
-async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == 'hist_back':
-        return await show_history(update, context, via_callback=True)
-
-    if data.startswith('histdel_'):
-        if not is_owner(update.effective_user.id):
-            await query.edit_message_text("⛔ Тільки власник може видаляти записи.")
-            await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
-            return MAIN_MENU
-        log_id = data.replace('histdel_', '')
-        fb_delete('dailyLogs', log_id)
-        await query.edit_message_text("✅ Запис видалено")
-        await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
-        return MAIN_MENU
-
-    log_id = data.replace('hist_', '')
-    logs = fb_get_all('dailyLogs')
-    log = next((l for l in logs if l['id'] == log_id), None)
-    if not log:
-        await query.edit_message_text("❌ Запис не знайдено")
-        return MAIN_MENU
-
-    total = _log_total(log)
-    text = f"📅 *{fmt_date(log.get('date','—'))} | {log.get('objName','—')}*\n"
-    if log.get('submittedBy'):
-        text += f"✍️ Вніс: {log['submittedBy']}\n"
-    text += "\n"
-    if log.get('workers'):
-        text += "👷 *Робітники:*\n"
-        for w in log['workers']:
-            text += f"  • {w.get('name','')} — {w.get('hrs',0)}год"
-            if w.get('rate'):
-                text += f" = {fmt_money(w['hrs']*w['rate'])}"
-            text += "\n"
-    if log.get('materials'):
-        text += "\n📦 *Матеріали:*\n"
-        for m in log['materials']:
-            text += f"  • {m.get('name','')} — {m.get('qty',0)} {m.get('unit','шт')}"
-            if m.get('price'):
-                text += f" x {fmt_money(m['price'])} = {fmt_money(m['qty']*m['price'])}"
-            text += "\n"
-    if log.get('transport'):
-        text += "\n🚛 *Транспорт:*\n"
-        for t in log['transport']:
-            text += f"  • {t.get('name','')} — {fmt_money(t.get('cost',0))}\n"
-    if log.get('desc'):
-        text += f"\n📝 {log['desc']}\n"
-    text += f"\n💰 *РАЗОМ: {fmt_money(total)}*"
-
-    buttons = [[InlineKeyboardButton("🔙 До списку", callback_data="hist_back")]]
-    if is_owner(update.effective_user.id):
-        buttons.insert(0, [InlineKeyboardButton("🗑 Видалити цей запис", callback_data=f"histdel_{log_id}")])
-    await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
-    return HISTORY_LIST
-
-# ── ОБ'ЄКТИ ──────────────────────────────────────────────────
+# ── ОБ'ЄКТИ ───────────────────────────────────────────────────
 async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
-
-    text = "🏗️ *Об'єкти:*\n\n"
-    if not objects:
-        text = "🏗️ Об'єктів немає\n\n"
-    for o in objects:
-        status = {'active':'🟢','plan':'🔵','done':'✅','pause':'⏸️'}.get(o.get('status',''),'⚪')
-        text += f"{status} *{o['name']}*\n"
-        if o.get('client'): text += f"   👤 {o['client']}\n"
-        if o.get('contract'): text += f"   💰 {fmt_money(o['contract'])}\n"
-
-    buttons = [[InlineKeyboardButton("➕ Додати об'єкт", callback_data="addobj_start")]]
-    await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    buttons = [[InlineKeyboardButton(f"🏗️ {o['name']}", callback_data=f"obj_detail_{o['id']}")] for o in objects]
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
+    await update.message.reply_text(
+        "🏗️ *Об'єкти*",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
     return OBJECTS_ACTION
 
 async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == 'addobj_start':
-        await query.edit_message_text("✏️ Введіть назву нового об'єкта:")
-        context.user_data['awaiting'] = 'new_obj_name'
-        context.user_data['new_obj'] = {}
-        return OBJ_INPUT
-    return MAIN_MENU
+    
+    if query.data == 'back_to_menu':
+        return await back_to_menu(update, context)
+    
+    return OBJECTS_ACTION
 
-async def skip_new_obj(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    awaiting = context.user_data.get('awaiting', '')
-    if awaiting == 'new_obj_client':
-        context.user_data['awaiting'] = 'new_obj_contract'
-        await update.message.reply_text("💰 Сума договору, ₴ (число, або /skip якщо невідомо):")
-        return OBJ_INPUT
-    if awaiting == 'new_obj_contract':
-        return await save_new_object(update, context)
-    return OBJ_INPUT
-
-async def save_new_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    obj = context.user_data.get('new_obj', {})
-    obj.setdefault('status', 'active')
-    obj.setdefault('client', '')
-    obj.setdefault('contract', 0)
-    doc_id = fb_add('objects', obj)
-    context.user_data.pop('new_obj', None)
-    context.user_data.pop('awaiting', None)
-    if doc_id:
-        await update.message.reply_text(f"✅ Об'єкт «{obj['name']}» додано!", reply_markup=main_keyboard())
+# ── ІСТОРІЯ ────────────────────────────────────────────────────
+async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    logs = fb_get_all('dailyLogs')
+    
+    if not logs:
+        msg = "📜 Записів немає"
+        if via_callback:
+            await update.callback_query.edit_message_text(msg)
+        else:
+            await update.message.reply_text(msg, reply_markup=main_keyboard())
+        return MAIN_MENU
+    
+    buttons = [[InlineKeyboardButton(f"📅 {fmt_date(l.get('date'))} — {l.get('objName')}", callback_data=f"hist_{l['id']}")] for l in logs[:10]]
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
+    
+    msg = "📜 *Мої записи:*"
+    if via_callback:
+        await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text("❌ Помилка збереження. Перевірте Firebase.", reply_markup=main_keyboard())
-    return MAIN_MENU
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+    return HISTORY_LIST
 
-async def new_object_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    awaiting = context.user_data.get('awaiting', '')
+async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith('hist_'):
+        log_id = query.data.replace('hist_', '')
+        logs = fb_get_all('dailyLogs')
+        log = next((l for l in logs if l['id'] == log_id), None)
+        
+        if log:
+            text = f"📋 {fmt_date(log.get('date'))} — {log.get('objName')}\n\n"
+            text += f"Введено: {log.get('submittedBy')}\n"
+            await query.edit_message_text(text)
+        
+        return HISTORY_LIST
+    
+    if query.data == 'hist_back':
+        return await show_history(update, context, via_callback=True)
+    
+    return HISTORY_LIST
 
-    if awaiting == 'new_obj_name':
-        if not text:
-            await update.message.reply_text("❌ Назва не може бути порожньою. Введіть назву об'єкта:")
-            return OBJ_INPUT
-        context.user_data['new_obj']['name'] = text
-        context.user_data['awaiting'] = 'new_obj_client'
-        await update.message.reply_text("👤 Ім'я клієнта/контактної особи (або /skip):")
-        return OBJ_INPUT
-
-    if awaiting == 'new_obj_client':
-        context.user_data['new_obj']['client'] = text
-        context.user_data['awaiting'] = 'new_obj_contract'
-        await update.message.reply_text("💰 Сума договору, ₴ (число, або /skip якщо невідомо):")
-        return OBJ_INPUT
-
-    if awaiting == 'new_obj_contract':
-        try:
-            contract = float(text.replace(',', '.').replace(' ', ''))
-        except:
-            contract = 0
-        context.user_data['new_obj']['contract'] = contract
-        return await save_new_object(update, context)
-
-    return OBJ_INPUT
-
-# ── ДОПОМОГА ──────────────────────────────────────────────────
-async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❓ *Як користуватись ботом:*\n\n"
-        "📅 *Щоденний звіт* — оберіть дату (сьогодні/вчора/іншу), потім вносьте хто працював, матеріали, транспорт. На кожному кроці можна натиснути «↩️ Назад», якщо треба щось виправити\n\n"
-        "🧾 *Фото чека* — сфотографуйте чек або накладну, бот розпізнає і запише\n\n"
-        "📦 *Склад* — перегляд залишків матеріалів, є пошук за назвою\n\n"
-        "📊 *Звіт* — витрати та прибуток по об'єкту\n\n"
-        "📜 *Мої записи* — останні 10 записів, можна переглянути деталі або видалити\n\n"
-        "📆 *Планування* — додайте нагадування чи план на дату, і бот сам надішле список о 8:00 ранку в день події\n\n"
-        "💡 *Порада:* Всі дані синхронізуються з веб-програмою автоматично",
-        parse_mode='Markdown',
-        reply_markup=main_keyboard()
-    )
-
-# ── СКАСУВАННЯ ───────────────────────────────────────────────
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Скасовано", reply_markup=main_keyboard())
-    return MAIN_MENU
-
-# ── ГОЛОВНА ФУНКЦІЯ ───────────────────────────────────────────
-# ── ПЛАНУВАННЯ (НАГАДУВАННЯ ТА ПЛАНИ) ─────────────────────────
+# ── ПЛАНУВАННЯ ────────────────────────────────────────────────
 async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("➕ Додати нагадування", callback_data="plan_add")],
         [InlineKeyboardButton("📋 Найближчі", callback_data="plan_list")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
     await update.message.reply_text(
-        "📆 *Планування*\n\nДодайте нагадування чи план на дату — вранці о 8:00 в день події бот надішле список.",
+        "📆 *Планування*\n\nЩо робити?",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
     )
@@ -1699,638 +1444,145 @@ async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == 'plan_add':
-        await query.edit_message_text("✏️ Введіть текст нагадування чи плану:")
-        return PLAN_TEXT
-    if query.data == 'plan_list':
-        return await show_plan_list(update, context, via_callback=True)
-    return PLAN_MENU
+    data = query.data
 
-async def plan_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text:
-        await update.message.reply_text("✏️ Введіть текст нагадування чи плану:")
-        return PLAN_TEXT
-    context.user_data['pending_plan'] = {'name': text}
-    buttons = [
-        [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
-         InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
-        [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
-    ]
-    await update.message.reply_text("🗓 На яку дату?", reply_markup=InlineKeyboardMarkup(buttons))
-    return PLAN_DATE
+    if data == 'plan_add':
+        buttons = [
+            [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
+             InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
+            [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+        ]
+        await query.edit_message_text(
+            "📅 На яку дату додати нагадування?",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return PLAN_DATE
+
+    if data == 'plan_list':
+        plans = fb_get_all('plans')
+        if not plans:
+            await query.edit_message_text("📋 Нагадувань немає")
+        else:
+            text = "📋 *Найближчі нагадування:*\n\n"
+            for p in plans[:10]:
+                text += f"📅 {fmt_date(p.get('date'))} — {p.get('text')}\n"
+            await query.edit_message_text(text, parse_mode='Markdown')
+        return PLAN_MENU
+
+    return PLAN_MENU
 
 async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
     if data == 'plandate_today':
-        return await ask_plan_time(update, context, today_str(), via_callback=True)
-    if data == 'plandate_tomorrow':
-        d = (date.today() + timedelta(days=1)).isoformat()
-        return await ask_plan_time(update, context, d, via_callback=True)
-    if data == 'plandate_custom':
-        await query.edit_message_text("✏️ Введіть дату у форматі ДД.ММ.РРРР (наприклад: 28.09.2026):")
-        context.user_data['awaiting_plan_date'] = True
+        chosen_date = today_str()
+    elif data == 'plandate_tomorrow':
+        chosen_date = (date.today() + timedelta(days=1)).isoformat()
+    elif data == 'plandate_custom':
+        await query.edit_message_text("✏️ Введіть дату (ДД.ММ.РРРР):")
+        context.user_data['awaiting'] = 'plan_date'
         return PLAN_DATE
-    return PLAN_DATE
-
-async def plan_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_plan_date'):
-        await update.message.reply_text("⚠️ Скористайтесь кнопками вище.")
-        return PLAN_DATE
-    text = update.message.text.strip()
-    try:
-        parts = text.replace('/', '.').replace('-', '.').split('.')
-        if len(parts) != 3:
-            raise ValueError
-        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-        chosen = date(y, m, d).isoformat()
-        context.user_data.pop('awaiting_plan_date', None)
-        return await ask_plan_time(update, context, chosen, via_callback=False)
-    except Exception:
-        await update.message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.09.2026)")
-        return PLAN_DATE
-
-async def ask_plan_time(update, context, chosen_date, via_callback):
-    context.user_data.setdefault('pending_plan', {})['date'] = chosen_date
-    buttons = [[InlineKeyboardButton("⏭ Без часу", callback_data="plantime_skip")]]
-    msg = "🕐 Час (наприклад 14:30) — або натисніть «Без часу»:"
-    if via_callback:
-        await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
-    return PLAN_TIME
+        return PLAN_DATE
+
+    context.user_data['plan_date'] = chosen_date
+    await query.edit_message_text(f"📝 Введіть текст нагадування:")
+    context.user_data['awaiting'] = 'plan_text'
+    return PLAN_TEXT
 
 async def plan_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     if query.data == 'plantime_skip':
-        return await save_plan_event(update, context, '', via_callback=True)
+        plan = {
+            'date': context.user_data.get('plan_date'),
+            'text': context.user_data.get('plan_text'),
+            'time': None,
+            'done': False
+        }
+        fb_add('plans', plan)
+        await query.edit_message_text("✅ Нагадування додано")
+        await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+        return MAIN_MENU
+    
     return PLAN_TIME
 
-async def plan_time_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import re
-    text = update.message.text.strip()
-    if re.match(r'^\d{1,2}:\d{2}$', text):
-        return await save_plan_event(update, context, text, via_callback=False)
-    await update.message.reply_text("❌ Формат часу: ГГ:ХХ, наприклад 14:30 — або натисніть «Без часу» вище")
-    return PLAN_TIME
+# ── ДОПОМОГА ──────────────────────────────────────────────────
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = """🤖 *Моніторинг виробництва — Бот*
 
-async def save_plan_event(update, context, time_str, via_callback):
-    plan = context.user_data.pop('pending_plan', {})
-    if not plan.get('name') or not plan.get('date'):
-        text = "❌ Щось пішло не так, спробуйте додати нагадування ще раз."
-    else:
-        plan['time'] = time_str
-        plan.setdefault('type', 'other')
-        plan.setdefault('objId', '')
-        plan.setdefault('priority', 'normal')
-        plan.setdefault('note', '')
-        fb_add('planEvents', plan)
-        text = f"✅ Додано: {plan.get('name')}\n📅 {fmt_date(plan.get('date',''))}" + (f" о {time_str}" if time_str else "")
-    if via_callback:
-        await update.callback_query.edit_message_text(text)
-        await update.callback_query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
-    else:
-        await update.message.reply_text(text, reply_markup=main_keyboard())
-    return MAIN_MENU
+📅 *Щоденний звіт* — вносьте робітників, матеріали та транспорт
+🧾 *Фото чека* — розпізнавання матеріалів з фотографій
+📦 *Склад* — перегляд матеріалів
+📊 *Звіт* — звіти по об'єктам
+📆 *Планування* — нагадування
+❓ *Допомога* — ця інформація
 
-async def show_plan_list(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
-    events = fb_get_all('planEvents')
-    todaystr = today_str()
-    upcoming = sorted(
-        [e for e in events if e.get('date', '') >= todaystr],
-        key=lambda e: (e.get('date', ''), e.get('time', '') or '99:99')
-    )[:15]
-    if not upcoming:
-        text = "📋 Немає запланованих нагадувань чи планів."
-    else:
-        lines = ["📋 *Найближчі плани:*\n"]
-        for e in upcoming:
-            t = f" о {e['time']}" if e.get('time') else ""
-            lines.append(f"• {fmt_date(e.get('date',''))}{t} — {e.get('name','')}")
-        text = "\n".join(lines)
-    if via_callback:
-        await update.callback_query.edit_message_text(text, parse_mode='Markdown')
-        await update.callback_query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
-    else:
-        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=main_keyboard())
-    return MAIN_MENU
+⬅️ *Назад* — повернутись на головне меню з будь-якого місця
+"""
+    await update.message.reply_text(text, parse_mode='Markdown')
 
-async def morning_plan_digest(context: ContextTypes.DEFAULT_TYPE):
-    """Щоранку о 8:00 надсилає список нагадувань/планів, зустрічей на сьогодні
-    та попередження про матеріали, яких бракує на складі"""
-    settings = fb_get_all('settings')
-    admin = next((s for s in settings if s['id'] == 'admin'), None)
-    if not admin or not admin.get('chat_id'):
-        return
-    todaystr = today_str()
-    events = [e for e in fb_get_all('planEvents') if e.get('date') == todaystr]
-    meets = [m for m in fb_get_all('meetings') if m.get('date') == todaystr]
-    low_stock = [m for m in fb_get_all('matStock') if (m.get('qty') or 0) < (m.get('min') or 0)]
-
-    if not events and not meets and not low_stock:
-        return
-
-    lines = [f"☀️ Доброго ранку! ({fmt_date(todaystr)})\n"]
-
-    if events or meets:
-        items = sorted(
-            [{'time': e.get('time', ''), 'name': e.get('name', ''), 'icon': '📌'} for e in events] +
-            [{'time': m.get('time', ''), 'name': m.get('name', ''), 'icon': '🤝'} for m in meets],
-            key=lambda x: x['time'] or '99:99'
-        )
-        lines.append("📆 *На сьогодні:*")
-        for it in items:
-            t = f"{it['time']} — " if it['time'] else ""
-            lines.append(f"{it['icon']} {t}{it['name']}")
-
-    if low_stock:
-        if events or meets:
-            lines.append("")
-        lines.append("⚠️ *Закінчується на складі:*")
-        for m in sorted(low_stock, key=lambda x: x.get('name', '')):
-            need = max((m.get('min') or 0) - (m.get('qty') or 0), 0)
-            lines.append(f"📦 {m.get('name','')} — залишок {m.get('qty',0)} {m.get('unit','')} (докупити ~{need} {m.get('unit','')})")
-
-    try:
-        await context.bot.send_message(chat_id=admin['chat_id'], text="\n".join(lines), parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Morning digest send error: {e}")
-
-async def meeting_reminder_job(context: ContextTypes.DEFAULT_TYPE):
-    """Двічі на день (о 9:00 і о 18:00) нагадує про заплановані зустрічі на
-    найближчі 2 дні. Нагадування само зупиняється, щойно дата зустрічі мине
-    або зустріч видалять (скасують) у програмі — окремого статусу 'скасовано'
-    не потрібно, досить прибрати зустріч зі "Зустрічі" у веб-додатку."""
-    settings = fb_get_all('settings')
-    admin = next((s for s in settings if s['id'] == 'admin'), None)
-    if not admin or not admin.get('chat_id'):
-        return
-    today = date.today()
-    upcoming = []
-    for m in fb_get_all('meetings'):
-        d = m.get('date')
-        if not d:
-            continue
-        try:
-            md = datetime.strptime(d, '%Y-%m-%d').date()
-        except ValueError:
-            continue
-        delta = (md - today).days
-        if 0 <= delta <= 2:
-            upcoming.append((delta, m))
-    if not upcoming:
-        return
-    upcoming.sort(key=lambda x: (x[0], x[1].get('time') or '99:99'))
-    lines = ["🔔 *Нагадування про заплановані зустрічі:*\n"]
-    for delta, m in upcoming:
-        when = "сьогодні" if delta == 0 else ("завтра" if delta == 1 else fmt_date(m.get('date', '')))
-        t = f" о {m['time']}" if m.get('time') else ""
-        place = f" · {m['place']}" if m.get('place') else ""
-        lines.append(f"🤝 {when}{t} — {m.get('name', '')}{place}")
-    lines.append("\n_Якщо зустріч скасована — видаліть її в програмі (розділ «Зустрічі»), і нагадування припиняться._")
-    try:
-        await context.bot.send_message(chat_id=admin['chat_id'], text="\n".join(lines), parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Meeting reminder send error: {e}")
-
-async def send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id=None):
-    """Формує JSON-резервну копію всіх колекцій Firestore і надсилає документом у Telegram."""
-    if not db:
-        return
-    if chat_id is None:
-        settings = fb_get_all('settings')
-        admin = next((s for s in settings if s['id'] == 'admin'), None)
-        if not admin or not admin.get('chat_id'):
-            return
-        chat_id = admin['chat_id']
-    try:
-        backup = {}
-        total_docs = 0
-        for col_ref in db.collections():
-            col_data = {}
-            for d in col_ref.stream():
-                col_data[d.id] = d.to_dict()
-                total_docs += 1
-            backup[col_ref.id] = col_data
-        payload = json.dumps(backup, ensure_ascii=False, indent=2, default=str)
-        bio = BytesIO(payload.encode('utf-8'))
-        fname = f"backup_{today_str()}.json"
-        bio.name = fname
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=bio,
-            filename=fname,
-            caption=f"🗄️ Резервна копія бази даних · {fmt_date(today_str())}\nКолекцій: {len(backup)} · Документів: {total_docs}"
-        )
-    except Exception as e:
-        logger.error(f"Backup send error: {e}")
-
-async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE):
-    """Щоденна автоматична резервна копія (о 02:00) — надсилається адміну."""
-    await send_backup(context)
-
-async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /backup — миттєва резервна копія на вимогу."""
-    await update.message.reply_text("🗄️ Формую резервну копію...")
-    await send_backup(context, chat_id=update.effective_chat.id)
-
-# ── СИНХРОНІЗАЦІЯ З GOOGLE-ТАБЛИЦЕЮ "Облік_продажу" ───────────
-def _parse_ua_number(s):
-    """Перетворює число у форматі '10 454,40' або '96,80' на float."""
-    if s is None:
-        return 0.0
-    s = str(s).strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
-    if not s:
-        return 0.0
-    try:
-        return float(s)
-    except ValueError:
-        return 0.0
-
-def _parse_ua_date(s):
-    """Перетворює дату 'ДД.ММ.РРРР' на 'РРРР-ММ-ДД'. Порожнє або незрозуміле — повертає ''."""
-    s = (s or '').strip()
-    if not s:
-        return ''
-    parts = s.split('.')
-    if len(parts) == 3:
-        d, m, y = parts
-        if len(y) == 2:
-            y = '20' + y
-        try:
-            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
-        except ValueError:
-            return ''
-    return ''
-
-def _currency_from_sheet(s):
-    s = (s or '').strip()
-    return 'USD' if '$' in s else 'UAH'
-
-def _fetch_sheet_rows(gid):
-    """Завантажує аркуш Google-таблиці (за gid) як список словників (csv.DictReader)."""
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read()
-    text = raw.decode('utf-8-sig')
-    return list(csv.DictReader(io.StringIO(text)))
-
-async def sync_from_sheets(context: ContextTypes.DEFAULT_TYPE, chat_id=None, manual=False):
-    """Підтягує нові закупівлі/продажі з Google-таблиці "Облік_продажу" в Firestore.
-    Записи, які вже перенесені раніше (за excelId), пропускаються — тому безпечно
-    викликати повторно скільки завгодно."""
-    if not db:
-        return
-    try:
-        purchase_rows = _fetch_sheet_rows(SHEET_GID_PURCHASES)
-        sale_rows = _fetch_sheet_rows(SHEET_GID_SALES)
-    except Exception as e:
-        logger.error(f"Sync fetch error: {e}")
-        if manual and chat_id:
-            await context.bot.send_message(chat_id, f"❌ Не вдалося завантажити таблицю: {e}")
-        return
-
-    existing_purchases = fb_get_all('purchases')
-    existing_sales = fb_get_all('sales')
-    excel_to_fsid = {p.get('excelId'): p['id'] for p in existing_purchases if p.get('excelId')}
-    existing_purchase_eids = set(excel_to_fsid.keys())
-    existing_sale_eids = {s.get('excelId') for s in existing_sales if s.get('excelId')}
-    # eid -> {fsid, rate, currency, price} — джерело правди для собівартості продажу,
-    # бо в аркуші "Продажі" курс/валюта закупівлі не завжди продубльовані коректно
-    purchase_info = {
-        p.get('excelId'): {'fsid': p['id'], 'rate': p.get('rate') or 1,
-                            'currency': p.get('currency') or 'UAH', 'price': p.get('price') or 0}
-        for p in existing_purchases if p.get('excelId')
-    }
-
-    added_purchases = 0
-    for row in purchase_rows:
-        eid = (row.get('№ закупки') or '').strip()
-        name = (row.get('Найменування') or '').strip()
-        if not eid or not name or eid in existing_purchase_eids:
-            continue
-        qty = _parse_ua_number(row.get('К-ть закуплено'))
-        if qty <= 0:
-            continue
-        p_price = _parse_ua_number(row.get('Ціна закупки (за од.)'))
-        p_currency = _currency_from_sheet(row.get('Валюта закупки'))
-        p_rate = _parse_ua_number(row.get('Курс на дату закупки')) or 1
-        doc_id = fb_add('purchases', {
-            'name': name,
-            'supplier': (row.get('Постачальник') or '').strip(),
-            'supplierPhone': (row.get('Контакт постачальника') or '').strip(),
-            'date': _parse_ua_date(row.get('Дата закупки')) or today_str(),
-            'qty': qty,
-            'unit': (row.get('Од. вим.') or 'шт').strip() or 'шт',
-            'price': p_price,
-            'currency': p_currency,
-            'rate': p_rate,
-            'note': (row.get('№ накладної/чека') or '').strip(),
-            'excelId': eid,
-            'source': 'excel-sync',
-        })
-        if doc_id:
-            excel_to_fsid[eid] = doc_id
-            existing_purchase_eids.add(eid)
-            purchase_info[eid] = {'fsid': doc_id, 'rate': p_rate, 'currency': p_currency, 'price': p_price}
-            added_purchases += 1
-
-    added_sales = 0
-    for row in sale_rows:
-        eid = (row.get('№ продажу') or '').strip()
-        name = (row.get('Найменування') or '').strip()
-        if not eid or not name or eid in existing_sale_eids:
-            continue
-        qty = _parse_ua_number(row.get('К-ть продано'))
-        if qty <= 0:
-            continue
-        purchase_eid = (row.get('№ закупки') or '').strip()
-        pinfo = purchase_info.get(purchase_eid)
-        purchase_fsid = pinfo['fsid'] if pinfo else ''
-        sale_currency = _currency_from_sheet(row.get('Валюта продажу'))
-        sale_rate = _parse_ua_number(row.get('Курс на дату продажу'))
-        if sale_rate <= 0:
-            # У рядку продажу курс не заповнено — якщо валюта та сама, що й у партії
-            # закупівлі, беремо курс звідти (найімовірніше та сама угода), інакше 1
-            sale_rate = pinfo['rate'] if (pinfo and pinfo['currency'] == sale_currency) else 1
-        # Собівартість завжди беремо з самої партії закупівлі (джерело правди),
-        # а не з можливо порожніх/неточних дубльованих колонок в аркуші "Продажі"
-        if pinfo:
-            cost_price, cost_currency, cost_rate = pinfo['price'], pinfo['currency'], pinfo['rate']
-        else:
-            cost_price = _parse_ua_number(row.get('Ціна закупки (за од.)'))
-            cost_currency = _currency_from_sheet(row.get('Валюта закупки'))
-            cost_rate = sale_rate
-        paid_raw = (row.get('Статус оплати') or '').strip().lower()
-        paid = paid_raw in ('так', 'оплачено', 'paid', '✓', '+', 'оплата')
-        note_bits = []
-        inv_ref = (row.get('№ накладної/чека') or '').strip()
-        if inv_ref:
-            note_bits.append(f"Накладна (Excel): {inv_ref}")
-        doc_id = fb_add('sales', {
-            'purchaseId': purchase_fsid,
-            'name': name,
-            'buyer': (row.get('Покупець') or '').strip(),
-            'buyerContact': (row.get('Контакт покупця') or '').strip(),
-            'siteAddress': (row.get("Об'єкт/адреса монтажу") or '').strip(),
-            'objId': '',
-            'date': _parse_ua_date(row.get('Дата продажу')) or today_str(),
-            'warrantyUntil': _parse_ua_date(row.get('Гарантія до')),
-            'qty': qty,
-            'price': _parse_ua_number(row.get('Ціна продажна (за од.)')),
-            'currency': sale_currency,
-            'rate': sale_rate,
-            'costPrice': cost_price,
-            'costCurrency': cost_currency,
-            'costRate': cost_rate,
-            'paid': paid,
-            'invoiceId': '',
-            'note': ' · '.join(note_bits),
-            'excelId': eid,
-            'source': 'excel-sync',
-        })
-        if doc_id:
-            existing_sale_eids.add(eid)
-            added_sales += 1
-
-    if added_purchases or added_sales or manual:
-        msg = f"🔄 Синхронізація Excel → програма: +{added_purchases} закупівель, +{added_sales} продажів"
-        logger.info(msg)
-        if chat_id:
-            await context.bot.send_message(chat_id, msg)
-        elif OWNER_ID and (added_purchases or added_sales):
-            try:
-                await context.bot.send_message(int(OWNER_ID), msg)
-            except Exception as e:
-                logger.error(f"Sync notify error: {e}")
-
-async def sync_sheets_job(context: ContextTypes.DEFAULT_TYPE):
-    """Періодична автоматична синхронізація (кожні 15 хв)."""
-    await sync_from_sheets(context)
-
-async def sync_sheets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /syncsheets — синхронізація на вимогу."""
-    await update.message.reply_text("🔄 Перевіряю таблицю на нові записи...")
-    await sync_from_sheets(context, chat_id=update.effective_chat.id, manual=True)
-
-async def check_daily_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """Щовечора перевіряє, чи внесено хоч один звіт сьогодні, і нагадує, якщо ні"""
-    settings = fb_get_all('settings')
-    admin = next((s for s in settings if s['id'] == 'admin'), None)
-    if not admin or not admin.get('chat_id'):
-        return
-    logs = fb_get_all('dailyLogs')
-    today_logs = [l for l in logs if l.get('date') == today_str()]
-    if today_logs:
-        return
-    try:
-        await context.bot.send_message(
-            chat_id=admin['chat_id'],
-            text="⏰ Нагадування: сьогодні ще не внесено жодного щоденного звіту!"
-        )
-    except Exception as e:
-        logger.error(f"Reminder send error: {e}")
-
-# ── ГЛОБАЛЬНИЙ ОБРОБНИК ПОМИЛОК ────────────────────────────────
-# Мінімальний інтервал між сповіщеннями власнику про конфлікт опитування (див. нижче) —
-# щоб один редеплой (де конфлікт може спрацювати 2-3 рази поспіль за кілька секунд,
-# поки старий процес остаточно не зупиниться) не засипав Telegram однаковими нотатками.
-_last_conflict_alert_ts = 0.0
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Catches any exception that escapes a handler (Gemini/Firestore hiccup, malformed
-    data, etc.) so a single failure never leaves the bot silently stuck for that user —
-    and so the owner finds out immediately instead of only after the user reports
-    "не працює" with screenshots. python-telegram-bot already keeps polling other updates
-    when one handler raises; this just makes that failure visible and recoverable."""
-    logger.error("Unhandled exception:", exc_info=context.error)
-
-    # "Conflict: terminated by other getUpdates request" фактично завжди означає одну
-    # й ту саму нешкідливу, самозагойну ситуацію: Railway ще на секунду-дві лишає старий
-    # процес живим (він саме встигає доопитати Telegram), поки новий після редеплою вже
-    # піднявся й теж почав опитувати. Це не помилка застосунку й не потребує жодної дії —
-    # старий процес сам завершується, і бот одразу працює далі. Раніше на кожен такий
-    # випадок (а їх під час одного редеплою буває 2-3) власнику летів повний Python-трейсбек,
-    # що виглядало як серйозна поломка, хоча бот насправді вже відновився. Тепер замість
-    # цього — одне спокійне повідомлення, не частіше ніж раз на 2 хвилини.
-    if isinstance(context.error, Conflict):
-        logger.warning("Transient polling conflict (self-resolves): %s", context.error)
-        global _last_conflict_alert_ts
-        now = time.monotonic()
-        if now - _last_conflict_alert_ts > 120:
-            _last_conflict_alert_ts = now
-            try:
-                settings = fb_get_all('settings')
-                admin = next((s for s in settings if s['id'] == 'admin'), None)
-                if admin and admin.get('chat_id'):
-                    await context.bot.send_message(
-                        chat_id=admin['chat_id'],
-                        text="🔄 Бот щойно перезапустився (оновлення на сервері) — "
-                             "за кілька секунд усе працює як зазвичай, окремо робити нічого не треба."
-                    )
-            except Exception as e:
-                logger.error(f"Conflict-notice send failed: {e}")
-        return
-
-    # Let the user know something broke, instead of silence, and point them back to /start.
-    try:
-        if isinstance(update, Update) and update.effective_message:
-            await update.effective_message.reply_text(
-                "⚠️ Сталася технічна помилка. Спробуйте ще раз або надішліть /start.",
-                reply_markup=main_keyboard()
-            )
-    except Exception as e:
-        logger.error(f"Error-handler reply failed: {e}")
-
-    # Alert the admin with the traceback so problems get noticed without the user reporting them.
-    # Sent WITHOUT parse_mode (plain text) — a raw traceback is full of underscores, brackets
-    # and asterisks that would either break Telegram's Markdown parser or get mangled by
-    # md_safe(), and here the exact, unmodified text is the whole point.
-    try:
-        settings = fb_get_all('settings')
-        admin = next((s for s in settings if s['id'] == 'admin'), None)
-        if admin and admin.get('chat_id'):
-            tb = ''.join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__))
-            if len(tb) > 3500:
-                tb = tb[-3500:]
-            await context.bot.send_message(
-                chat_id=admin['chat_id'],
-                text=f"🐛 Помилка в боті:\n\n{tb}"
-            )
-    except Exception as e:
-        logger.error(f"Error-handler admin alert failed: {e}")
-
+# ── ОСНОВНИЙ ЦИКЛ ─────────────────────────────────────────────
 def main():
+    app = Application.builder().token(BOT_TOKEN).build()
     init_firebase()
     _patch_markdown_safety_net()
 
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN не задано!")
-        return
-
-    app = Application.builder().token(BOT_TOKEN).build()
-
     # Conversation handler
     conv_handler = ConversationHandler(
-        # Conversation state lives only in memory (no persistence configured), so every
-        # deploy/restart wipes it for all users. Without a broad entry point, a user whose
-        # state was wiped taps a menu button or /cancel and gets silence — nothing matches
-        # entry_points (only /start did), and fallbacks only fire for chats PTB still thinks
-        # are "in conversation". Catching /cancel and any plain text here too makes the bot
-        # self-heal on the very next tap after a restart, instead of requiring /start by hand.
-        entry_points=[
-            CommandHandler('start', start),
-            CommandHandler('cancel', start),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, start),
-        ],
+        entry_points=[CommandHandler("start", start), MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)],
         states={
-            MAIN_MENU: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
-            ],
+            MAIN_MENU: [MessageHandler(filters.TEXT, main_menu_handler)],
             SELECT_DATE: [
-                CallbackQueryHandler(date_callback, pattern='^date_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler),
+                CallbackQueryHandler(date_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
-            SELECT_OBJECT: [
-                CallbackQueryHandler(select_object, pattern='^obj_')
-            ],
+            SELECT_OBJECT: [CallbackQueryHandler(select_object)],
             DAILY_WORKERS: [
-                CallbackQueryHandler(worker_callback, pattern='^wrk_'),
-                CallbackQueryHandler(hours_callback, pattern='^hrs_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler),
+                CallbackQueryHandler(worker_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
             DAILY_MATERIALS: [
-                CallbackQueryHandler(materials_callback, pattern='^mat_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler),
+                CallbackQueryHandler(materials_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
             DAILY_TRANSPORT: [
-                CallbackQueryHandler(transport_callback, pattern='^tr_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler),
+                CallbackQueryHandler(transport_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
             DAILY_DESC: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
-            DAILY_CONFIRM: [
-                CallbackQueryHandler(daily_confirm_callback, pattern='^daily_'),
-            ],
+            DAILY_CONFIRM: [CallbackQueryHandler(daily_confirm_callback)],
             RECEIPT_PHOTO: [
-                MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), receipt_photo),
+                CallbackQueryHandler(receipt_target_callback),
+                MessageHandler(filters.PHOTO | filters.TEXT, receipt_photo)
             ],
-            RECEIPT_CONFIRM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_docnum_handler),
-            ],
-            RECEIPT_TARGET: [
-                CallbackQueryHandler(receipt_target_callback, pattern='^rec'),
-            ],
-            STOCK_ACTION: [
-                CallbackQueryHandler(stock_action_callback, pattern='^stock_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
-            ],
-            STOCK_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_search_handler),
-            ],
-            HISTORY_LIST: [
-                CallbackQueryHandler(history_detail_callback, pattern='^hist'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
-            ],
-            OBJECTS_ACTION: [
-                CallbackQueryHandler(objects_action_callback, pattern='^addobj'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
-            ],
-            OBJ_INPUT: [
-                CommandHandler('skip', skip_new_obj),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, new_object_text_handler),
-            ],
-            PLAN_MENU: [
-                CallbackQueryHandler(plan_menu_callback, pattern='^plan_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler),
-            ],
-            PLAN_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_text_input),
-            ],
+            RECEIPT_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_docnum_handler)],
+            RECEIPT_TARGET: [CallbackQueryHandler(receipt_target_callback)],
+            STOCK_ACTION: [CallbackQueryHandler(stock_action_callback)],
+            HISTORY_LIST: [CallbackQueryHandler(history_detail_callback)],
+            OBJECTS_ACTION: [CallbackQueryHandler(objects_action_callback)],
+            PLAN_MENU: [CallbackQueryHandler(plan_menu_callback)],
             PLAN_DATE: [
-                CallbackQueryHandler(plan_date_callback, pattern='^plandate_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_date_text),
+                CallbackQueryHandler(plan_date_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_date_callback)
             ],
-            PLAN_TIME: [
-                CallbackQueryHandler(plan_time_callback, pattern='^plantime_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, plan_time_text),
-            ],
+            PLAN_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_time_callback)],
+            PLAN_TIME: [CallbackQueryHandler(plan_time_callback)],
         },
-        fallbacks=[
-            CommandHandler('cancel', cancel),
-            CommandHandler('start', start),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, start),],
+        fallbacks=[CommandHandler("start", start)],
     )
 
     app.add_handler(conv_handler)
-    # Report callback (outside conversation for /start re-entry)
-    app.add_handler(CallbackQueryHandler(report_callback, pattern='^rep_'))
-    # Ручна резервна копія на вимогу
-    app.add_handler(CommandHandler('backup', backup_command))
-    # Ручна синхронізація з Google-таблицею на вимогу
-    app.add_handler(CommandHandler('syncsheets', sync_sheets_command))
-    # Глобальний обробник помилок — жодна помилка не лишає бота мовчки "завислим"
-    app.add_error_handler(error_handler)
+    app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu'))
 
-    if app.job_queue:
-        app.job_queue.run_daily(check_daily_reminder, time=dtime(hour=20, minute=0))
-        app.job_queue.run_daily(morning_plan_digest, time=dtime(hour=8, minute=0))
-        app.job_queue.run_daily(meeting_reminder_job, time=dtime(hour=9, minute=0))
-        app.job_queue.run_daily(meeting_reminder_job, time=dtime(hour=18, minute=0))
-        app.job_queue.run_daily(daily_backup_job, time=dtime(hour=2, minute=0))
-        app.job_queue.run_repeating(sync_sheets_job, interval=900, first=60)
-    else:
-        logger.error("JobQueue недоступний — нагадування вимкнено (потрібен пакет python-telegram-bot[job-queue])")
-
-    logger.info("Бот запущено! ✅")
-    app.run_polling(drop_pending_updates=True)
+    logger.info("🤖 Бот запущено")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
-
-
