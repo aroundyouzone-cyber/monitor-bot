@@ -1568,12 +1568,10 @@ def main():
             PLAN_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_time_callback)],
             PLAN_TIME: [CallbackQueryHandler(plan_time_callback)],
         },
-        fallbacks=[
-            CommandHandler("start", start),
-            CallbackQueryHandler(back_to_menu, pattern='^back_to_menu'),
-        ],
+        fallbacks=[CommandHandler("start", start)],
     )
 
+    app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu'))
     app.add_handler(conv_handler)
 
     logger.info("🤖 Бот запущено")
