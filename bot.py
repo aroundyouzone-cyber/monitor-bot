@@ -219,10 +219,87 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── КНОПКА НАЗАД ──────────────────────────────────────────────
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробляч для кнопки 'Назад' — повертає на головне меню"""
+    """Обробляч для кнопки 'Назад' — повертає на попередній стан"""
     query = update.callback_query
     await query.answer()
-    context.user_data.clear()  # Очищуємо дані про промежуточні стани
+
+    # Перевіряємо, чи є збережений попередній стан
+    previous_state = context.user_data.get('previous_state')
+
+    if previous_state == SELECT_DATE:
+        return await start_daily(update, context)
+    elif previous_state == SELECT_OBJECT:
+        # Повертаємось до вибору об'єкту для щоденного звіту
+        daily = context.user_data.get('daily', {})
+        chosen_date = daily.get('date', today_str())
+        context.user_data['previous_state'] = SELECT_DATE
+        return await show_object_buttons(update, context, chosen_date, via_callback=True)
+    elif previous_state == DAILY_WORKERS:
+        context.user_data['previous_state'] = SELECT_OBJECT
+        return await ask_workers(update, context)
+    elif previous_state == DAILY_MATERIALS:
+        context.user_data['previous_state'] = DAILY_WORKERS
+        return await ask_materials(update, context)
+    elif previous_state == DAILY_TRANSPORT:
+        context.user_data['previous_state'] = DAILY_MATERIALS
+        return await ask_transport(update, context)
+    elif previous_state == DAILY_DESC:
+        context.user_data['previous_state'] = DAILY_TRANSPORT
+        return await ask_transport(update, context)
+    elif previous_state == DAILY_CONFIRM:
+        context.user_data['previous_state'] = DAILY_DESC
+        await query.edit_message_text("📝 Опишіть що зробили за день:")
+        context.user_data['awaiting'] = 'daily_desc'
+        return DAILY_DESC
+    elif previous_state == RECEIPT_PHOTO:
+        return await start_receipt(update, context)
+    elif previous_state == RECEIPT_TARGET:
+        receipt = context.user_data.get('receipt', {})
+        context.user_data['previous_state'] = RECEIPT_PHOTO
+        await send_receipt_preview_message(update, receipt)
+        return RECEIPT_TARGET
+    elif previous_state == STOCK_ACTION:
+        return await show_stock(update, context)
+    elif previous_state == HISTORY_LIST:
+        return await show_history(update, context, via_callback=True)
+    elif previous_state == OBJECTS_ACTION:
+        return await show_objects(update, context)
+    elif previous_state == PLAN_MENU:
+        return await start_plan(update, context)
+    elif previous_state == PLAN_DATE:
+        context.user_data['previous_state'] = PLAN_MENU
+        buttons = [
+            [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
+             InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
+            [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+        ]
+        await query.edit_message_text(
+            "📅 На яку дату додати нагадування?",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return PLAN_DATE
+    elif previous_state == PLAN_TEXT:
+        context.user_data['previous_state'] = PLAN_DATE
+        buttons = [
+            [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
+             InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
+            [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+        ]
+        await query.edit_message_text(
+            "📅 На яку дату додати нагадування?",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return PLAN_DATE
+    elif previous_state == PLAN_TIME:
+        context.user_data['previous_state'] = PLAN_TEXT
+        await query.edit_message_text(f"📝 Введіть текст нагадування:")
+        context.user_data['awaiting'] = 'plan_text'
+        return PLAN_TEXT
+
+    # За замовчуванням повертаємось на головне меню
+    context.user_data.clear()
     await query.edit_message_text(
         "👋 Повернулися на головне меню. Обери дію:",
         reply_markup=main_keyboard()
@@ -242,6 +319,7 @@ async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return MAIN_MENU
 
+    context.user_data['previous_state'] = MAIN_MENU
     buttons = [
         [InlineKeyboardButton("📅 Сьогодні", callback_data="date_today"),
          InlineKeyboardButton("📆 Вчора", callback_data="date_yesterday")],
@@ -285,6 +363,7 @@ async def show_object_buttons(update, context, chosen_date, via_callback=False):
         'date': chosen_date,
         'workers': [], 'materials': [], 'transport': [], 'desc': ''
     }
+    context.user_data['previous_state'] = SELECT_DATE
 
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"obj_{o['id']}")] for o in active]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
@@ -309,6 +388,7 @@ async def select_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['daily']['objId'] = obj_id
     context.user_data['daily']['objName'] = obj['name']
     context.user_data['objects'] = objects
+    context.user_data['previous_state'] = SELECT_OBJECT
 
     # Show workers selection
     return await ask_workers(update, context)
@@ -316,6 +396,7 @@ async def select_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workers = get_workers()
     context.user_data['workers_list'] = workers
+    context.user_data['previous_state'] = DAILY_WORKERS
 
     daily = context.user_data['daily']
     added = daily['workers']
@@ -615,6 +696,7 @@ async def ask_materials(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_materials_msg(update, context, via_callback=False):
     context.user_data['daily_phase'] = 'materials'
+    context.user_data['previous_state'] = DAILY_MATERIALS
     daily = context.user_data['daily']
     added = daily['materials']
 
@@ -700,6 +782,7 @@ async def ask_transport(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_transport_msg(update, context, via_callback=False):
     context.user_data['daily_phase'] = 'transport'
+    context.user_data['previous_state'] = DAILY_TRANSPORT
     daily = context.user_data['daily']
     added = daily['transport']
 
@@ -743,6 +826,7 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     daily = context.user_data['daily']
+    context.user_data['previous_state'] = DAILY_CONFIRM
 
     total_hrs = sum(w['hrs'] for w in daily['workers'])
     total_wage = sum(w['hrs'] * w.get('rate', 0) for w in daily['workers'])
@@ -829,6 +913,7 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 # ── ФОТО ЧЕКА / НАКЛАДНОЇ ────────────────────────────────────
 async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['previous_state'] = MAIN_MENU
     await update.message.reply_text(
         "🧾 *Фото чека або накладної*\n\n"
         "Надішліть фото документу — бот розпізнає матеріали, суму і номер документа (чека/накладної/рахунка) автоматично. "
@@ -1063,6 +1148,7 @@ async def send_receipt_preview_message(update, receipt):
 
 async def show_receipt_preview(update, context):
     receipt = context.user_data.get('receipt', {})
+    context.user_data['previous_state'] = RECEIPT_PHOTO
     await send_receipt_preview_message(update, receipt)
     return RECEIPT_TARGET
 
@@ -1265,6 +1351,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ── СКЛАД ────────────────────────────────────────────────────
 async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['previous_state'] = MAIN_MENU
     buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")],
                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]
     await update.message.reply_text(
@@ -1303,6 +1390,7 @@ async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ── ЗВІТ ПО ОБ'ЄКТУ ───────────────────────────────────────────
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['previous_state'] = MAIN_MENU
     objects = get_objects()
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"rep_{o['id']}")] for o in objects[:10]]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
@@ -1353,6 +1441,7 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ── ОБ'ЄКТИ ───────────────────────────────────────────────────
 async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['previous_state'] = MAIN_MENU
     objects = get_objects()
     buttons = [[InlineKeyboardButton(f"🏗️ {o['name']}", callback_data=f"obj_detail_{o['id']}")] for o in objects]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
@@ -1374,6 +1463,7 @@ async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ── ІСТОРІЯ ────────────────────────────────────────────────────
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    context.user_data['previous_state'] = MAIN_MENU
     logs = fb_get_all('dailyLogs')
 
     if not logs:
@@ -1396,6 +1486,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_c
 
 # ── ПЛАНУВАННЯ ────────────────────────────────────────────────
 async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['previous_state'] = MAIN_MENU
     buttons = [
         [InlineKeyboardButton("➕ Додати нагадування", callback_data="plan_add")],
         [InlineKeyboardButton("📋 Найближчі", callback_data="plan_list")],
@@ -1414,6 +1505,7 @@ async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = query.data
 
     if data == 'plan_add':
+        context.user_data['previous_state'] = PLAN_MENU
         buttons = [
             [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
              InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
@@ -1455,6 +1547,7 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
             chosen_date = date(y, m, d).isoformat()
             context.user_data['plan_date'] = chosen_date
+            context.user_data['previous_state'] = PLAN_DATE
             await update.message.reply_text(f"📝 Введіть текст нагадування:")
             context.user_data['awaiting'] = 'plan_text'
             return PLAN_TEXT
@@ -1467,6 +1560,7 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif data == 'plandate_tomorrow':
         chosen_date = (date.today() + timedelta(days=1)).isoformat()
     elif data == 'plandate_custom':
+        context.user_data['previous_state'] = PLAN_DATE
         await query.edit_message_text("✏️ Введіть дату (ДД.ММ.РРРР):")
         context.user_data['awaiting'] = 'plan_date'
         return PLAN_DATE
@@ -1474,6 +1568,7 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return PLAN_DATE
 
     context.user_data['plan_date'] = chosen_date
+    context.user_data['previous_state'] = PLAN_DATE
     await query.edit_message_text(f"📝 Введіть текст нагадування:")
     context.user_data['awaiting'] = 'plan_text'
     return PLAN_TEXT
@@ -1482,6 +1577,7 @@ async def plan_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Handle text input for plan text
     text = update.message.text.strip()
     context.user_data['plan_text'] = text
+    context.user_data['previous_state'] = PLAN_TEXT
 
     buttons = [
         [InlineKeyboardButton("⏭ Без часу", callback_data="plantime_skip")],
