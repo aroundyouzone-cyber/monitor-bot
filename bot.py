@@ -452,11 +452,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             })
             context.user_data.pop('pending_worker', None)
             context.user_data.pop('awaiting', None)
-            return await ask_workers_msg(update, context)
+            return await ask_workers(update, context)
         except:
             await update.message.reply_text("❌ Введіть число, наприклад: 8 або 7.5")
             return DAILY_WORKERS
-            
+
     if awaiting == 'worker_manual':
             raw_entries = text.replace('\n', ',').split(',')
             entries = [e.strip() for e in raw_entries if e.strip()]
@@ -481,10 +481,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if failed:
                 await update.message.reply_text(f"⚠️ Не розпізнано: {', '.join(failed)}")
             if added:
-                return await ask_workers_msg(update, context)
+                return await ask_workers(update, context)
             else:
                 await update.message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
                 return DAILY_WORKERS
+
     if awaiting == 'material_stock_qty':
         try:
             qty = float(text.replace(',', '.'))
@@ -515,13 +516,13 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             warn = "\n⚠️ Залишок став від'ємним!" if new_qty < 0 else ""
             await update.message.reply_text(f"✅ Списано {qty} {mat.get('unit','шт')}. Залишок: {new_qty}{warn}")
-            return await ask_materials_msg(update, context)
+            return await ask_materials(update, context)
         except:
             await update.message.reply_text("❌ Введіть число, наприклад: 10")
             return DAILY_MATERIALS
 
     if awaiting == 'material_name':
-   
+
         context.user_data['pending_material'] = {'name': text}
         await update.message.reply_text(
             f"📦 *{text}*\n\nВведіть кількість та одиницю (наприклад: 50 м або 10 шт):",
@@ -557,11 +558,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data['daily']['materials'].append(mat)
             context.user_data.pop('pending_material', None)
             context.user_data.pop('awaiting', None)
-            return await ask_materials_msg(update, context)
+            return await ask_materials(update, context)
         except:
             await update.message.reply_text("❌ Введіть число (ціну)")
             return DAILY_MATERIALS
-            
+
     if awaiting == 'transport_name':
         context.user_data['pending_transport'] = {'name': text}
         await update.message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):")
@@ -590,7 +591,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data['daily']['transport'].append(tr)
             context.user_data.pop('pending_transport', None)
             context.user_data.pop('awaiting', None)
-            return await ask_transport_msg(update, context)
+            return await ask_transport(update, context)
         except:
             await update.message.reply_text("❌ Введіть число (ціну)")
             return DAILY_TRANSPORT
@@ -600,38 +601,13 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop('awaiting', None)
         return await confirm_daily(update, context)
 
+    # Fallback for unexpected text
     phase = context.user_data.get('daily_phase', 'workers')
     await update.message.reply_text("⚠️ Скористайтесь кнопками вище, або натисніть відповідну кнопку зі списку.")
     if phase == 'materials':
         return DAILY_MATERIALS
     if phase == 'transport':
         return DAILY_TRANSPORT
-    return DAILY_WORKERS
-
-async def ask_workers_msg(update, context, via_callback=False):
-    """Show workers screen via message (not callback)"""
-    context.user_data['daily_phase'] = 'workers'
-    workers = get_workers()
-    context.user_data['workers_list'] = workers
-    daily = context.user_data['daily']
-    added = daily['workers']
-
-    text = f"📅 *{daily['objName']}*\n\n👷 Хто ще працював? (або Далі)\n"
-    if added:
-        text += "\nДодано:\n"
-        for w in added:
-            text += f"  • {w['name']} — {w['hrs']}год\n"
-
-    buttons = []
-    for w in workers:
-        if not any(a['name'] == w.get('name') for a in added):
-            buttons.append([InlineKeyboardButton(f"👷 {w['name']}", callback_data=f"wrk_{w['id']}")])
-    buttons.append([InlineKeyboardButton("✅ Далі — Матеріали", callback_data="wrk_done")])
-
-    if via_callback and update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
-    else:
-        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     return DAILY_WORKERS
 
 async def ask_materials(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -716,7 +692,7 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode='Markdown'
         )
         context.user_data['awaiting'] = 'material_stock_qty'
-        return DAILY_MATERIALS   
+        return DAILY_MATERIALS
     return DAILY_MATERIALS
 
 async def ask_transport(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1250,7 +1226,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         obj = next((o for o in objects if o['id'] == obj_id), None)
         if not obj:
             return RECEIPT_TARGET
-        
+
         receipt = context.user_data.get('receipt', {})
         saved = 0
         failed = []
@@ -1308,7 +1284,7 @@ async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if not stocks:
             await query.edit_message_text("📦 Склад порожній")
             return STOCK_ACTION
-        
+
         text = "📦 *Склад:*\n\n"
         for s in stocks:
             name = s.get('name', '—')
@@ -1319,7 +1295,7 @@ async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if price:
                 text += f" × {fmt_money(price)}"
             text += "\n"
-        
+
         await query.edit_message_text(text, parse_mode='Markdown')
         return STOCK_ACTION
 
@@ -1337,23 +1313,42 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return HISTORY_LIST
 
-async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    obj_id = query.data.replace('rep_', '')
-    
-    logs = fb_get_all('dailyLogs')
-    obj_logs = [l for l in logs if l.get('objId') == obj_id]
-    
-    if not obj_logs:
-        await query.edit_message_text("❌ Записів немає")
+    data = query.data
+
+    if data.startswith('rep_'):
+        obj_id = data.replace('rep_', '')
+        logs = fb_get_all('dailyLogs')
+        obj_logs = [l for l in logs if l.get('objId') == obj_id]
+
+        if not obj_logs:
+            await query.edit_message_text("❌ Записів немає")
+            return HISTORY_LIST
+
+        text = f"📊 Звіт по об'єкту\n\n"
+        for log in obj_logs[:10]:
+            text += f"📅 {fmt_date(log.get('date'))} — {log.get('submittedBy')}\n"
+
+        await query.edit_message_text(text)
         return HISTORY_LIST
-    
-    text = f"📊 Звіт по об'єкту\n\n"
-    for log in obj_logs[:10]:
-        text += f"📅 {fmt_date(log.get('date'))} — {log.get('submittedBy')}\n"
-    
-    await query.edit_message_text(text)
+
+    if data.startswith('hist_'):
+        log_id = data.replace('hist_', '')
+        logs = fb_get_all('dailyLogs')
+        log = next((l for l in logs if l['id'] == log_id), None)
+
+        if log:
+            text = f"📋 {fmt_date(log.get('date'))} — {log.get('objName')}\n\n"
+            text += f"Введено: {log.get('submittedBy')}\n"
+            await query.edit_message_text(text)
+
+        return HISTORY_LIST
+
+    if query.data == 'hist_back':
+        return await show_history(update, context, via_callback=True)
+
     return HISTORY_LIST
 
 # ── ОБ'ЄКТИ ───────────────────────────────────────────────────
@@ -1371,16 +1366,16 @@ async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     if query.data == 'back_to_menu':
         return await back_to_menu(update, context)
-    
+
     return OBJECTS_ACTION
 
 # ── ІСТОРІЯ ────────────────────────────────────────────────────
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
     logs = fb_get_all('dailyLogs')
-    
+
     if not logs:
         msg = "📜 Записів немає"
         if via_callback:
@@ -1388,36 +1383,15 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_c
         else:
             await update.message.reply_text(msg, reply_markup=main_keyboard())
         return MAIN_MENU
-    
+
     buttons = [[InlineKeyboardButton(f"📅 {fmt_date(l.get('date'))} — {l.get('objName')}", callback_data=f"hist_{l['id']}")] for l in logs[:10]]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
-    
+
     msg = "📜 *Мої записи:*"
     if via_callback:
         await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     else:
         await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
-    return HISTORY_LIST
-
-async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data.startswith('hist_'):
-        log_id = query.data.replace('hist_', '')
-        logs = fb_get_all('dailyLogs')
-        log = next((l for l in logs if l['id'] == log_id), None)
-        
-        if log:
-            text = f"📋 {fmt_date(log.get('date'))} — {log.get('objName')}\n\n"
-            text += f"Введено: {log.get('submittedBy')}\n"
-            await query.edit_message_text(text)
-        
-        return HISTORY_LIST
-    
-    if query.data == 'hist_back':
-        return await show_history(update, context, via_callback=True)
-    
     return HISTORY_LIST
 
 # ── ПЛАНУВАННЯ ────────────────────────────────────────────────
@@ -1466,9 +1440,27 @@ async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return PLAN_MENU
 
 async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+    # Handle both CallbackQuery and Message
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+    else:
+        # Text input for custom date
+        text = update.message.text.strip()
+        try:
+            parts = text.replace('/', '.').replace('-', '.').split('.')
+            if len(parts) != 3:
+                raise ValueError
+            d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+            chosen_date = date(y, m, d).isoformat()
+            context.user_data['plan_date'] = chosen_date
+            await update.message.reply_text(f"📝 Введіть текст нагадування:")
+            context.user_data['awaiting'] = 'plan_text'
+            return PLAN_TEXT
+        except:
+            await update.message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
+            return PLAN_DATE
 
     if data == 'plandate_today':
         chosen_date = today_str()
@@ -1487,9 +1479,25 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return PLAN_TEXT
 
 async def plan_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle text input for plan text
+    text = update.message.text.strip()
+    context.user_data['plan_text'] = text
+
+    buttons = [
+        [InlineKeyboardButton("⏭ Без часу", callback_data="plantime_skip")],
+    ]
+
+    await update.message.reply_text(
+        "⏰ Час нагадування? (можна пропустити)",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    context.user_data['awaiting'] = 'plan_time'
+    return PLAN_TIME
+
+async def plan_time_final_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     if query.data == 'plantime_skip':
         plan = {
             'date': context.user_data.get('plan_date'),
@@ -1501,7 +1509,7 @@ async def plan_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("✅ Нагадування додано")
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
-    
+
     return PLAN_TIME
 
 # ── ДОПОМОГА ──────────────────────────────────────────────────
@@ -1527,7 +1535,10 @@ def main():
 
     # Conversation handler
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start), MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)],
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
+        ],
         states={
             MAIN_MENU: [MessageHandler(filters.TEXT, main_menu_handler)],
             SELECT_DATE: [
@@ -1566,12 +1577,14 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, plan_date_callback)
             ],
             PLAN_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_time_callback)],
-            PLAN_TIME: [CallbackQueryHandler(plan_time_callback)],
+            PLAN_TIME: [CallbackQueryHandler(plan_time_final_callback)],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(back_to_menu, pattern='^back_to_menu'),
+        ],
     )
 
-    app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu'))
     app.add_handler(conv_handler)
 
     logger.info("🤖 Бот запущено")
