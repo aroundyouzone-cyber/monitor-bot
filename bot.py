@@ -319,7 +319,10 @@ def _with_back(states):
     # (без pattern) перехоплюють back_to_menu і він не спрацьовує
     back_cb = CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$')
     back_txt = MessageHandler(filters.Regex('^🔙 Назад$'), back_text_handler)
-    return {k: [back_cb, back_txt, *v] for k, v in states.items()}
+    # Кнопки головного меню (reply-клавіатура) працюють з будь-якого кроку
+    menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Фото чека/накладної|📦 Склад|📊 Звіт по об\'єкту|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
+    menu_h = MessageHandler(menu_re, main_menu_handler)
+    return {k: [back_cb, back_txt, menu_h, *v] for k, v in states.items()}
 
 # ── ЩОДЕННИЙ ЗВІТ ────────────────────────────────────────────
 async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
