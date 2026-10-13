@@ -173,13 +173,14 @@ def main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_allowed(uid):
-        await update.message.reply_text("⛔ У вас немає доступу до цього бота.\nЗверніться до адміністратора.")
+        await update.effective_message.reply_text("⛔ У вас немає доступу до цього бота.\nЗверніться до адміністратора.")
         return ConversationHandler.END
 
     name = update.effective_user.first_name
+    nav_reset(context)
     if is_owner(uid):
         fb_set('settings', 'admin', {'chat_id': update.effective_chat.id})
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"👋 Привіт, {name}!\n\n"
         f"🏗️ *Моніторинг виробництва + ІТР*\n\n"
         f"Що можеш робити:\n"
@@ -197,6 +198,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── ГОЛОВНЕ МЕНЮ ──────────────────────────────────────────────
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    nav_reset(context)
+    context.user_data.pop('daily', None)
 
     if text == '📅 Щоденний звіт':
         return await start_daily(update, context)
@@ -217,94 +220,94 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
     return MAIN_MENU
 
-# ── КНОПКА НАЗАД ──────────────────────────────────────────────
-async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробляч для кнопки 'Назад' — повертає на попередній стан"""
+# ── НАВІГАЦІЯ «НАЗАД» (стек екранів) ─────────────────────────
+# Кожен екран, який бот показує, кладе свою назву в context.user_data['nav'].
+# «⬅️ Назад» знімає поточний екран і перерисовує попередній.
+NAV_MAIN = 'main'
+
+def nav_push(context, screen):
+    stack = context.user_data.setdefault('nav', [])
+    if not stack or stack[-1] != screen:
+        stack.append(screen)
+
+def nav_reset(context):
+    context.user_data['nav'] = []
+
+async def show_or_edit(update, text, reply_markup=None, parse_mode=None):
+    # Змінює поточне повідомлення, якщо це натискання кнопки; інакше надсилає нове
     query = update.callback_query
-    await query.answer()
+    if query:
+        try:
+            await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+            return
+        except BadRequest as e:
+            logger.warning(f"edit_message_text не вдалося, надсилаю нове: {e}")
+    await update.effective_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-    # Перевіряємо, чи є збережений попередній стан
-    previous_state = context.user_data.get('previous_state')
-
-    if previous_state == SELECT_DATE:
-        return await start_daily(update, context)
-    elif previous_state == SELECT_OBJECT:
-        # Повертаємось до вибору об'єкту для щоденного звіту
-        daily = context.user_data.get('daily', {})
-        chosen_date = daily.get('date', today_str())
-        context.user_data['previous_state'] = SELECT_DATE
-        return await show_object_buttons(update, context, chosen_date, via_callback=True)
-    elif previous_state == DAILY_WORKERS:
-        context.user_data['previous_state'] = SELECT_OBJECT
-        return await ask_workers(update, context)
-    elif previous_state == DAILY_MATERIALS:
-        context.user_data['previous_state'] = DAILY_WORKERS
-        return await ask_materials(update, context)
-    elif previous_state == DAILY_TRANSPORT:
-        context.user_data['previous_state'] = DAILY_MATERIALS
-        return await ask_transport(update, context)
-    elif previous_state == DAILY_DESC:
-        context.user_data['previous_state'] = DAILY_TRANSPORT
-        return await ask_transport(update, context)
-    elif previous_state == DAILY_CONFIRM:
-        context.user_data['previous_state'] = DAILY_DESC
-        await query.edit_message_text("📝 Опишіть що зробили за день:")
-        context.user_data['awaiting'] = 'daily_desc'
-        return DAILY_DESC
-    elif previous_state == RECEIPT_PHOTO:
-        return await start_receipt(update, context)
-    elif previous_state == RECEIPT_TARGET:
-        receipt = context.user_data.get('receipt', {})
-        context.user_data['previous_state'] = RECEIPT_PHOTO
-        await send_receipt_preview_message(update, receipt)
-        return RECEIPT_TARGET
-    elif previous_state == STOCK_ACTION:
-        return await show_stock(update, context)
-    elif previous_state == HISTORY_LIST:
-        return await show_history(update, context, via_callback=True)
-    elif previous_state == OBJECTS_ACTION:
-        return await show_objects(update, context)
-    elif previous_state == PLAN_MENU:
-        return await start_plan(update, context)
-    elif previous_state == PLAN_DATE:
-        context.user_data['previous_state'] = PLAN_MENU
-        buttons = [
-            [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
-             InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
-            [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
-        ]
-        await query.edit_message_text(
-            "📅 На яку дату додати нагадування?",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return PLAN_DATE
-    elif previous_state == PLAN_TEXT:
-        context.user_data['previous_state'] = PLAN_DATE
-        buttons = [
-            [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
-             InlineKeyboardButton("📆 Завтра", callback_data="plandate_tomorrow")],
-            [InlineKeyboardButton("✏️ Інша дата", callback_data="plandate_custom")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
-        ]
-        await query.edit_message_text(
-            "📅 На яку дату додати нагадування?",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return PLAN_DATE
-    elif previous_state == PLAN_TIME:
-        context.user_data['previous_state'] = PLAN_TEXT
-        await query.edit_message_text(f"📝 Введіть текст нагадування:")
-        context.user_data['awaiting'] = 'plan_text'
-        return PLAN_TEXT
-
-    # За замовчуванням повертаємось на головне меню
-    context.user_data.clear()
-    await query.edit_message_text(
+async def go_main_menu(update, context):
+    for k in ('daily', 'receipt', 'awaiting'):
+        context.user_data.pop(k, None)
+    nav_reset(context)
+    query = update.callback_query
+    if query:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+    # ReplyKeyboard не можна прикріпити до edit_message_text — тому нове повідомлення
+    await update.effective_message.reply_text(
         "👋 Повернулися на головне меню. Обери дію:",
         reply_markup=main_keyboard()
     )
     return MAIN_MENU
+
+async def render_objects_screen(update, context):
+    date_str = (context.user_data.get('daily') or {}).get('date') or today_str()
+    return await show_object_buttons(update, context, date_str, via_callback=True)
+
+async def render_desc_screen(update, context):
+    nav_push(context, 'desc')
+    context.user_data['awaiting'] = 'daily_desc'
+    await show_or_edit(update, "📝 Опишіть що зробили за день:")
+    return DAILY_DESC
+
+def _nav_renderers():
+    # Ключ екрана → функція, яка його знову показує
+    return {
+        'date': start_daily,
+        'objects': render_objects_screen,
+        'workers': ask_workers,
+        'materials': ask_materials,
+        'transport': ask_transport,
+        'desc': render_desc_screen,
+        'confirm': confirm_daily,
+        'receipt': show_receipt_preview,
+    }
+
+async def back_to_menu(update, context):
+    # «⬅️ Назад» — повертає на ПОПЕРЕДНІЙ крок
+    query = update.callback_query
+    if query:
+        await query.answer()
+    stack = context.user_data.setdefault('nav', [])
+    if stack:
+        stack.pop()                                   # поточний екран
+    prev = stack.pop() if stack else NAV_MAIN         # попередній (його renderer знову покладе в стек)
+    renderer = _nav_renderers().get(prev)
+    if renderer is None:
+        return await go_main_menu(update, context)
+    return await renderer(update, context)
+
+async def back_text_handler(update, context):
+    # Текстова кнопка «🔙 Назад» з reply-клавіатури (екран фото чека)
+    return await go_main_menu(update, context)
+
+def _with_back(states):
+    # «Назад» ставимо ПЕРШИМ у кожному стані, інакше загальні CallbackQueryHandler
+    # (без pattern) перехоплюють back_to_menu і він не спрацьовує
+    back_cb = CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$')
+    back_txt = MessageHandler(filters.Regex('^🔙 Назад$'), back_text_handler)
+    return {k: [back_cb, back_txt, *v] for k, v in states.items()}
 
 # ── ЩОДЕННИЙ ЗВІТ ────────────────────────────────────────────
 async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,24 +315,21 @@ async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = [o for o in objects if o.get('status') == 'active']
 
     if not active:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "⚠️ Немає активних об'єктів.\n"
             "Спочатку додайте об'єкт у веб-програмі.",
             reply_markup=main_keyboard()
         )
         return MAIN_MENU
 
-    context.user_data['previous_state'] = MAIN_MENU
+    nav_push(context, 'date')
     buttons = [
         [InlineKeyboardButton("📅 Сьогодні", callback_data="date_today"),
          InlineKeyboardButton("📆 Вчора", callback_data="date_yesterday")],
         [InlineKeyboardButton("✏️ Інша дата", callback_data="date_custom")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
-    await update.message.reply_text(
-        "🗓 За яку дату вносимо звіт?",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await show_or_edit(update, "🗓 За яку дату вносимо звіт?", reply_markup=InlineKeyboardMarkup(buttons))
     return SELECT_DATE
 
 async def date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -356,14 +356,14 @@ async def show_object_buttons(update, context, chosen_date, via_callback=False):
         if via_callback and update.callback_query:
             await update.callback_query.edit_message_text(msg)
         else:
-            await update.message.reply_text(msg, reply_markup=main_keyboard())
+            await update.effective_message.reply_text(msg, reply_markup=main_keyboard())
         return MAIN_MENU
 
-    context.user_data['daily'] = {
-        'date': chosen_date,
-        'workers': [], 'materials': [], 'transport': [], 'desc': ''
-    }
-    context.user_data['previous_state'] = SELECT_DATE
+    daily = context.user_data.get('daily') or {}
+    if daily.get('date') != chosen_date:
+        daily = {'date': chosen_date, 'workers': [], 'materials': [], 'transport': [], 'desc': ''}
+    context.user_data['daily'] = daily
+    nav_push(context, 'objects')
 
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"obj_{o['id']}")] for o in active]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
@@ -371,7 +371,7 @@ async def show_object_buttons(update, context, chosen_date, via_callback=False):
     if via_callback and update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+        await update.effective_message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     return SELECT_OBJECT
 
 async def select_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,6 +394,7 @@ async def select_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_workers(update, context)
 
 async def ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'workers')
     workers = get_workers()
     context.user_data['workers_list'] = workers
     context.user_data['previous_state'] = DAILY_WORKERS
@@ -427,7 +428,7 @@ async def ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(msg_text, parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(msg_text, parse_mode='Markdown',
+        await update.effective_message.reply_text(msg_text, parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(buttons))
     return DAILY_WORKERS
 
@@ -518,7 +519,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await show_object_buttons(update, context, chosen_date, via_callback=False)
         except:
-            await update.message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
+            await update.effective_message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
             return SELECT_DATE
 
     if awaiting == 'worker_hrs_input':
@@ -535,7 +536,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await ask_workers(update, context)
         except:
-            await update.message.reply_text("❌ Введіть число, наприклад: 8 або 7.5")
+            await update.effective_message.reply_text("❌ Введіть число, наприклад: 8 або 7.5")
             return DAILY_WORKERS
 
     if awaiting == 'worker_manual':
@@ -560,11 +561,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     failed.append(entry)
             context.user_data.pop('awaiting', None)
             if failed:
-                await update.message.reply_text(f"⚠️ Не розпізнано: {', '.join(failed)}")
+                await update.effective_message.reply_text(f"⚠️ Не розпізнано: {', '.join(failed)}")
             if added:
                 return await ask_workers(update, context)
             else:
-                await update.message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
+                await update.effective_message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
                 return DAILY_WORKERS
 
     if awaiting == 'material_stock_qty':
@@ -596,16 +597,16 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('pending_material', None)
             context.user_data.pop('awaiting', None)
             warn = "\n⚠️ Залишок став від'ємним!" if new_qty < 0 else ""
-            await update.message.reply_text(f"✅ Списано {qty} {mat.get('unit','шт')}. Залишок: {new_qty}{warn}")
+            await update.effective_message.reply_text(f"✅ Списано {qty} {mat.get('unit','шт')}. Залишок: {new_qty}{warn}")
             return await ask_materials(update, context)
         except:
-            await update.message.reply_text("❌ Введіть число, наприклад: 10")
+            await update.effective_message.reply_text("❌ Введіть число, наприклад: 10")
             return DAILY_MATERIALS
 
     if awaiting == 'material_name':
 
         context.user_data['pending_material'] = {'name': text}
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"📦 *{text}*\n\nВведіть кількість та одиницю (наприклад: 50 м або 10 шт):",
             parse_mode='Markdown'
         )
@@ -621,13 +622,13 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             mat['qty'] = qty
             mat['unit'] = unit
             context.user_data['pending_material'] = mat
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"💰 Ціна за {unit} (введіть 0 якщо невідома):"
             )
             context.user_data['awaiting'] = 'material_price'
             return DAILY_MATERIALS
         except:
-            await update.message.reply_text("❌ Формат: 50 м або 10")
+            await update.effective_message.reply_text("❌ Формат: 50 м або 10")
             return DAILY_MATERIALS
 
     if awaiting == 'material_price':
@@ -641,12 +642,12 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await ask_materials(update, context)
         except:
-            await update.message.reply_text("❌ Введіть число (ціну)")
+            await update.effective_message.reply_text("❌ Введіть число (ціну)")
             return DAILY_MATERIALS
 
     if awaiting == 'transport_name':
         context.user_data['pending_transport'] = {'name': text}
-        await update.message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):")
+        await update.effective_message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):")
         context.user_data['awaiting'] = 'transport_qty'
         return DAILY_TRANSPORT
 
@@ -656,11 +657,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             tr = context.user_data.get('pending_transport', {})
             tr['qty'] = qty
             context.user_data['pending_transport'] = tr
-            await update.message.reply_text("💰 Ціна за одиницю (₴/км або ₴/год), введіть 0 якщо невідома:")
+            await update.effective_message.reply_text("💰 Ціна за одиницю (₴/км або ₴/год), введіть 0 якщо невідома:")
             context.user_data['awaiting'] = 'transport_price'
             return DAILY_TRANSPORT
         except:
-            await update.message.reply_text("❌ Введіть число, наприклад: 120")
+            await update.effective_message.reply_text("❌ Введіть число, наприклад: 120")
             return DAILY_TRANSPORT
 
     if awaiting == 'transport_price':
@@ -674,7 +675,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await ask_transport(update, context)
         except:
-            await update.message.reply_text("❌ Введіть число (ціну)")
+            await update.effective_message.reply_text("❌ Введіть число (ціну)")
             return DAILY_TRANSPORT
 
     if awaiting == 'daily_desc':
@@ -684,7 +685,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Fallback for unexpected text
     phase = context.user_data.get('daily_phase', 'workers')
-    await update.message.reply_text("⚠️ Скористайтесь кнопками вище, або натисніть відповідну кнопку зі списку.")
+    await update.effective_message.reply_text("⚠️ Скористайтесь кнопками вище, або натисніть відповідну кнопку зі списку.")
     if phase == 'materials':
         return DAILY_MATERIALS
     if phase == 'transport':
@@ -695,6 +696,7 @@ async def ask_materials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_materials_msg(update, context, via_callback=True)
 
 async def ask_materials_msg(update, context, via_callback=False):
+    nav_push(context, 'materials')
     context.user_data['daily_phase'] = 'materials'
     context.user_data['previous_state'] = DAILY_MATERIALS
     daily = context.user_data['daily']
@@ -781,6 +783,7 @@ async def ask_transport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await ask_transport_msg(update, context, via_callback=True)
 
 async def ask_transport_msg(update, context, via_callback=False):
+    nav_push(context, 'transport')
     context.user_data['daily_phase'] = 'transport'
     context.user_data['previous_state'] = DAILY_TRANSPORT
     daily = context.user_data['daily']
@@ -814,6 +817,7 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = query.data
 
     if data == 'tr_done':
+        nav_push(context, 'desc')
         await query.edit_message_text("📝 Коротко опишіть що зробили за день (або натисніть /skip):")
         context.user_data['awaiting'] = 'daily_desc'
         return DAILY_DESC
@@ -825,6 +829,7 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DAILY_TRANSPORT
 
 async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'confirm')
     daily = context.user_data['daily']
     context.user_data['previous_state'] = DAILY_CONFIRM
 
@@ -877,7 +882,7 @@ async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(text, parse_mode='Markdown',
+        await update.effective_message.reply_text(text, parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(buttons))
     return DAILY_CONFIRM
 
@@ -914,7 +919,7 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 # ── ФОТО ЧЕКА / НАКЛАДНОЇ ────────────────────────────────────
 async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['previous_state'] = MAIN_MENU
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "🧾 *Фото чека або накладної*\n\n"
         "Надішліть фото документу — бот розпізнає матеріали, суму і номер документа (чека/накладної/рахунка) автоматично. "
         "Якщо номер не розпізнався або його треба виправити — на наступному кроці буде кнопка \"🔖 Додати/Змінити № документа\".\n\n"
@@ -929,11 +934,11 @@ async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo of receipt"""
     if update.message.text == '🔙 Назад':
-        await update.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+        await update.effective_message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
     if update.message.photo:
-        await update.message.reply_text("🔍 Розпізнаю чек...")
+        await update.effective_message.reply_text("🔍 Розпізнаю чек...")
 
         if CLAUDE_AVAILABLE and CLAUDE_KEY:
             try:
@@ -974,7 +979,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parsed = json.loads(result_text)
 
                 if 'error' in parsed:
-                    await update.message.reply_text(
+                    await update.effective_message.reply_text(
                         f"⚠️ Не вдалось розпізнати: {parsed['error']}\n\nВведіть вручну:"
                     )
                     return RECEIPT_PHOTO
@@ -984,14 +989,14 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             except Exception as e:
                 logger.error(f"Claude receipt error: {e}")
-                await update.message.reply_text(
+                await update.effective_message.reply_text(
                     "⚠️ Помилка розпізнавання. Введіть вручну:\n"
                     "`Назва к-сть одиниця ціна`",
                     parse_mode='Markdown'
                 )
                 return RECEIPT_PHOTO
         else:
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 "⚠️ Розпізнавання недоступне (немає API ключа Claude).\n"
                 "Введіть вручну:\n`Назва к-сть одиниця ціна`",
                 parse_mode='Markdown'
@@ -1022,7 +1027,7 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             pass
 
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "❌ Не зрозумів формат.\nСпробуйте: `Кабель ВВГ 50 м 38`",
             parse_mode='Markdown'
         )
@@ -1141,12 +1146,13 @@ async def send_receipt_preview_message(update, receipt):
     text = build_receipt_preview_text(receipt)
     markup = InlineKeyboardMarkup(receipt_preview_buttons(receipt))
     try:
-        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=markup)
+        await update.effective_message.reply_text(text, parse_mode='Markdown', reply_markup=markup)
     except Exception as e:
         logger.error(f"Receipt preview Markdown error, resending as plain text: {e}")
-        await update.message.reply_text(text, reply_markup=markup)
+        await update.effective_message.reply_text(text, reply_markup=markup)
 
 async def show_receipt_preview(update, context):
+    nav_push(context, 'receipt')
     receipt = context.user_data.get('receipt', {})
     context.user_data['previous_state'] = RECEIPT_PHOTO
     await send_receipt_preview_message(update, receipt)
@@ -1354,7 +1360,7 @@ async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['previous_state'] = MAIN_MENU
     buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")],
                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "📦 *Склад матеріалів*\n\nЩо робити?",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1394,7 +1400,7 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"rep_{o['id']}")] for o in objects[:10]]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "📊 *Звіт по об'єкту*\n\nОберіть об'єкт:",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1445,7 +1451,7 @@ async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     objects = get_objects()
     buttons = [[InlineKeyboardButton(f"🏗️ {o['name']}", callback_data=f"obj_detail_{o['id']}")] for o in objects]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "🏗️ *Об'єкти*",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1471,7 +1477,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_c
         if via_callback:
             await update.callback_query.edit_message_text(msg)
         else:
-            await update.message.reply_text(msg, reply_markup=main_keyboard())
+            await update.effective_message.reply_text(msg, reply_markup=main_keyboard())
         return MAIN_MENU
 
     buttons = [[InlineKeyboardButton(f"📅 {fmt_date(l.get('date'))} — {l.get('objName')}", callback_data=f"hist_{l['id']}")] for l in logs[:10]]
@@ -1481,7 +1487,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_c
     if via_callback:
         await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+        await update.effective_message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     return HISTORY_LIST
 
 # ── ПЛАНУВАННЯ ────────────────────────────────────────────────
@@ -1492,7 +1498,7 @@ async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Найближчі", callback_data="plan_list")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "📆 *Планування*\n\nЩо робити?",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1548,11 +1554,11 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             chosen_date = date(y, m, d).isoformat()
             context.user_data['plan_date'] = chosen_date
             context.user_data['previous_state'] = PLAN_DATE
-            await update.message.reply_text(f"📝 Введіть текст нагадування:")
+            await update.effective_message.reply_text(f"📝 Введіть текст нагадування:")
             context.user_data['awaiting'] = 'plan_text'
             return PLAN_TEXT
         except:
-            await update.message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
+            await update.effective_message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
             return PLAN_DATE
 
     if data == 'plandate_today':
@@ -1583,7 +1589,7 @@ async def plan_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("⏭ Без часу", callback_data="plantime_skip")],
     ]
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "⏰ Час нагадування? (можна пропустити)",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
@@ -1619,9 +1625,9 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📆 *Планування* — нагадування
 ❓ *Допомога* — ця інформація
 
-⬅️ *Назад* — повернутись на головне меню з будь-якого місця
+⬅️ *Назад* — повернутись на попередній крок (далі — головне меню)
 """
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.effective_message.reply_text(text, parse_mode='Markdown')
 
 # ── ОСНОВНИЙ ЦИКЛ ─────────────────────────────────────────────
 def main():
@@ -1635,7 +1641,7 @@ def main():
             CommandHandler("start", start),
             MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
         ],
-        states={
+        states=_with_back({
             MAIN_MENU: [MessageHandler(filters.TEXT, main_menu_handler)],
             SELECT_DATE: [
                 CallbackQueryHandler(date_callback),
@@ -1674,7 +1680,7 @@ def main():
             ],
             PLAN_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_time_callback)],
             PLAN_TIME: [CallbackQueryHandler(plan_time_final_callback)],
-        },
+        }),
         fallbacks=[
             CommandHandler("start", start),
             CallbackQueryHandler(back_to_menu, pattern='^back_to_menu'),
