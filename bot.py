@@ -261,6 +261,12 @@ async def go_main_menu(update, context):
     )
     return MAIN_MENU
 
+def back_markup():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]])
+
+async def render_history(update, context):
+    return await show_history(update, context, via_callback=True)
+
 async def render_objects_screen(update, context):
     date_str = (context.user_data.get('daily') or {}).get('date') or today_str()
     return await show_object_buttons(update, context, date_str, via_callback=True)
@@ -282,6 +288,12 @@ def _nav_renderers():
         'desc': render_desc_screen,
         'confirm': confirm_daily,
         'receipt': show_receipt_preview,
+        'stock': show_stock,
+        'stock_list': show_stock_list,
+        'report': show_report,
+        'history': render_history,
+        'objects_list': show_objects,
+        'plan': start_plan,
     }
 
 async def back_to_menu(update, context):
@@ -1357,50 +1369,53 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ── СКЛАД ────────────────────────────────────────────────────
 async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'stock')
     context.user_data['previous_state'] = MAIN_MENU
     buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")],
                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]
-    await update.effective_message.reply_text(
+    await show_or_edit(update,
         "📦 *Склад матеріалів*\n\nЩо робити?",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
     )
     return STOCK_ACTION
 
+async def show_stock_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'stock_list')
+    stocks = fb_get_all('matStock')
+    if not stocks:
+        await show_or_edit(update, "📦 Склад порожній", reply_markup=back_markup())
+        return STOCK_ACTION
+
+    text = "📦 *Склад:*\n\n"
+    for s in stocks:
+        name = s.get('name', '—')
+        qty = s.get('qty', 0)
+        unit = s.get('unit', 'шт')
+        price = s.get('price', 0)
+        text += f"• {name} — {qty} {unit}"
+        if price:
+            text += f" × {fmt_money(price)}"
+        text += "\n"
+
+    await show_or_edit(update, text, reply_markup=back_markup(), parse_mode='Markdown')
+    return STOCK_ACTION
+
 async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
-
-    if data == 'stock_search':
-        stocks = fb_get_all('matStock')
-        if not stocks:
-            await query.edit_message_text("📦 Склад порожній")
-            return STOCK_ACTION
-
-        text = "📦 *Склад:*\n\n"
-        for s in stocks:
-            name = s.get('name', '—')
-            qty = s.get('qty', 0)
-            unit = s.get('unit', 'шт')
-            price = s.get('price', 0)
-            text += f"• {name} — {qty} {unit}"
-            if price:
-                text += f" × {fmt_money(price)}"
-            text += "\n"
-
-        await query.edit_message_text(text, parse_mode='Markdown')
-        return STOCK_ACTION
-
+    if query.data == 'stock_search':
+        return await show_stock_list(update, context)
     return STOCK_ACTION
 
 # ── ЗВІТ ПО ОБ'ЄКТУ ───────────────────────────────────────────
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'report')
     context.user_data['previous_state'] = MAIN_MENU
     objects = get_objects()
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"rep_{o['id']}")] for o in objects[:10]]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
-    await update.effective_message.reply_text(
+    await show_or_edit(update,
         "📊 *Звіт по об'єкту*\n\nОберіть об'єкт:",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1418,14 +1433,15 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
         obj_logs = [l for l in logs if l.get('objId') == obj_id]
 
         if not obj_logs:
-            await query.edit_message_text("❌ Записів немає")
+            await query.edit_message_text("❌ Записів немає", reply_markup=back_markup())
             return HISTORY_LIST
 
         text = f"📊 Звіт по об'єкту\n\n"
         for log in obj_logs[:10]:
             text += f"📅 {fmt_date(log.get('date'))} — {log.get('submittedBy')}\n"
 
-        await query.edit_message_text(text)
+        nav_push(context, 'report_detail')
+        await query.edit_message_text(text, reply_markup=back_markup())
         return HISTORY_LIST
 
     if data.startswith('hist_'):
@@ -1436,7 +1452,8 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
         if log:
             text = f"📋 {fmt_date(log.get('date'))} — {log.get('objName')}\n\n"
             text += f"Введено: {log.get('submittedBy')}\n"
-            await query.edit_message_text(text)
+            nav_push(context, 'history_detail')
+            await query.edit_message_text(text, reply_markup=back_markup())
 
         return HISTORY_LIST
 
@@ -1447,11 +1464,12 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ── ОБ'ЄКТИ ───────────────────────────────────────────────────
 async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'objects_list')
     context.user_data['previous_state'] = MAIN_MENU
     objects = get_objects()
     buttons = [[InlineKeyboardButton(f"🏗️ {o['name']}", callback_data=f"obj_detail_{o['id']}")] for o in objects]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
-    await update.effective_message.reply_text(
+    await show_or_edit(update,
         "🏗️ *Об'єкти*",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1469,6 +1487,7 @@ async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
 # ── ІСТОРІЯ ────────────────────────────────────────────────────
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    nav_push(context, 'history')
     context.user_data['previous_state'] = MAIN_MENU
     logs = fb_get_all('dailyLogs')
 
@@ -1492,13 +1511,14 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_c
 
 # ── ПЛАНУВАННЯ ────────────────────────────────────────────────
 async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nav_push(context, 'plan')
     context.user_data['previous_state'] = MAIN_MENU
     buttons = [
         [InlineKeyboardButton("➕ Додати нагадування", callback_data="plan_add")],
         [InlineKeyboardButton("📋 Найближчі", callback_data="plan_list")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
-    await update.effective_message.reply_text(
+    await show_or_edit(update,
         "📆 *Планування*\n\nЩо робити?",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1511,6 +1531,7 @@ async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = query.data
 
     if data == 'plan_add':
+        nav_push(context, 'plan_date')
         context.user_data['previous_state'] = PLAN_MENU
         buttons = [
             [InlineKeyboardButton("📅 Сьогодні", callback_data="plandate_today"),
@@ -1525,14 +1546,15 @@ async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return PLAN_DATE
 
     if data == 'plan_list':
+        nav_push(context, 'plan_list')
         plans = fb_get_all('plans')
         if not plans:
-            await query.edit_message_text("📋 Нагадувань немає")
+            await query.edit_message_text("📋 Нагадувань немає", reply_markup=back_markup())
         else:
             text = "📋 *Найближчі нагадування:*\n\n"
             for p in plans[:10]:
                 text += f"📅 {fmt_date(p.get('date'))} — {p.get('text')}\n"
-            await query.edit_message_text(text, parse_mode='Markdown')
+            await query.edit_message_text(text, parse_mode='Markdown', reply_markup=back_markup())
         return PLAN_MENU
 
     return PLAN_MENU
