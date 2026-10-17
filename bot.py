@@ -162,7 +162,7 @@ def get_workers():
 
 def main_keyboard():
     return ReplyKeyboardMarkup([
-        ['📅 Щоденний звіт', '🧾 Фото чека/накладної'],
+        ['📅 Щоденний звіт', '🧾 Чек / накладна / рахунок'],
         ['📦 Склад', '📊 Звіт по об\'єкту'],
         ['🏗️ Об\'єкти', '📜 Мої записи'],
         ['📆 Планування'],
@@ -211,7 +211,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == '📅 Щоденний звіт':
         return await start_daily(update, context)
-    elif text == '🧾 Фото чека/накладної':
+    elif text == '🧾 Чек / накладна / рахунок':
         return await start_receipt(update, context)
     elif text == '📦 Склад':
         return await show_stock(update, context)
@@ -446,7 +446,7 @@ def _with_back(states):
     cancel_txt = MessageHandler(filters.Regex('^❌ Скасувати$'), flow_cancel_text)
     cancel_cmd = CommandHandler('cancel', flow_cancel_text)
     # Кнопки головного меню (reply-клавіатура) працюють з будь-якого кроку
-    menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Фото чека/накладної|📦 Склад|📊 Звіт по об\'єкту|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
+    menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Чек / накладна / рахунок|📦 Склад|📊 Звіт по об\'єкту|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
     menu_h = MessageHandler(menu_re, main_menu_handler)
     fallback = MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback_handler)
     return {k: [back_cb, cancel_cb, back_txt, cancel_txt, cancel_cmd, menu_h, *v, fallback] for k, v in states.items()}
@@ -1105,12 +1105,14 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['previous_state'] = MAIN_MENU
     await update.effective_message.reply_text(
-        "🧾 *Фото чека або накладної*\n\n"
-        "Надішліть фото документу — бот розпізнає матеріали, суму і номер документа (чека/накладної/рахунка) автоматично. "
-        "Якщо номер не розпізнався або його треба виправити — на наступному кроці буде кнопка \"🔖 Додати/Змінити № документа\".\n\n"
-        "Або введіть вручну у форматі:\n"
-        "`Назва матеріалу кількість одиниця ціна`\n"
-        "Наприклад: `Кабель ВВГ 50 м 38`",
+        "🧾 *Внесення чеку, накладної або рахунку*\n\n"
+        "Тут можна внести покупку або документ у склад, закупівлі чи на об'єкт.\n\n"
+        "📷 *З фото:* надішліть фото документа — бот сам розпізнає матеріали, суму і номер. "
+        "Номер можна виправити кнопкою «🔖 Додати/Змінити № документа».\n\n"
+        "⌨️ *З клавіатури:* напишіть назву матеріалу, наприклад `Кабель ВВГ`. "
+        "Далі бот по одному запитає характеристику, одиницю, кількість і ціну.\n\n"
+        "Або одним рядком з рисками:\n"
+        "`Кабель ВВГ | 5×16 | 50 м | 56`",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardMarkup([['🔙 Назад']], resize_keyboard=True)
     )
@@ -2194,7 +2196,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """🤖 *Моніторинг виробництва — Бот*
 
 📅 *Щоденний звіт* — вносьте робітників, матеріали та транспорт
-🧾 *Фото чека* — розпізнавання матеріалів з фотографій
+🧾 *Чек / накладна / рахунок* — внести покупку з фото або вручну
 📦 *Склад* — перегляд матеріалів
 📊 *Звіт* — звіти по об'єктам
 📆 *Планування* — нагадування
