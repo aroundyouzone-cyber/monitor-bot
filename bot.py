@@ -279,6 +279,11 @@ def prompt_markup():
         InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel"),
     ]])
 
+def nav_row(back_data="back_to_menu"):
+    # Ряд кнопок під будь-яким екраном звіту: повернутись або скасувати
+    return [InlineKeyboardButton("⬅️ Назад", callback_data=back_data),
+            InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel")]
+
 def undo_markup(ms):
     if not ms:
         return None
@@ -559,6 +564,7 @@ async def ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append([InlineKeyboardButton("✅ Далі — Матеріали", callback_data="wrk_done")])
     if added:
         buttons.append([InlineKeyboardButton("🔙 Видалити останнього", callback_data="wrk_undo")])
+    buttons.append(nav_row())
 
     msg_text = text
     if update.callback_query:
@@ -571,6 +577,8 @@ async def ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def worker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.data.startswith('hrs_'):
+        return await hours_callback(update, context)
     await query.answer()
     data = query.data
 
@@ -613,6 +621,7 @@ async def worker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("6 год", callback_data="hrs_6"),
              InlineKeyboardButton("12 год", callback_data="hrs_12"),
              InlineKeyboardButton("Ввести", callback_data="hrs_custom")],
+            nav_row("hrs_back"),
         ])
     )
     return DAILY_WORKERS
@@ -621,6 +630,11 @@ async def hours_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    if data == 'hrs_back':
+        context.user_data.pop('pending_worker', None)
+        context.user_data.pop('awaiting', None)
+        return await ask_workers(update, context)
 
     if data.startswith('hrs_') and data != 'hrs_custom':
         hrs = float(data.replace('hrs_', ''))
@@ -635,7 +649,8 @@ async def hours_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await ask_workers(update, context)
 
     if data == 'hrs_custom':
-        await query.edit_message_text("Введіть кількість годин (наприклад: 8 або 7.5):")
+        await query.edit_message_text("Введіть кількість годин (наприклад: 8 або 7.5):",
+            reply_markup=InlineKeyboardMarkup([nav_row("hrs_back")]))
         context.user_data['awaiting'] = 'worker_hrs_input'
         return DAILY_WORKERS
 
@@ -882,6 +897,9 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await ask_transport(update, context)
     if data == 'mat_skip_tr':
         return await confirm_daily(update, context)
+    if data == 'mat_back':
+        context.user_data.pop('awaiting', None)
+        return await ask_materials_msg(update, context, via_callback=True)
     if data == 'mat_undo':
         if context.user_data['daily']['materials']:
             context.user_data['daily']['materials'].pop()
@@ -895,6 +913,7 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 callback_data=f"matsel_{s['id']}"
             )])
         buttons.append([InlineKeyboardButton("✏️ Немає в списку — вручну", callback_data="mat_manual")])
+        buttons.append(nav_row("mat_back"))
         await query.edit_message_text("📦 Оберіть матеріал зі складу:", reply_markup=InlineKeyboardMarkup(buttons))
         return DAILY_MATERIALS
     if data == 'mat_manual':
