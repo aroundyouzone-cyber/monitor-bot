@@ -508,6 +508,7 @@ async def show_object_buttons(update, context, chosen_date, via_callback=False):
     nav_push(context, 'objects')
 
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"obj_{o['id']}")] for o in active]
+    buttons.append([InlineKeyboardButton("➕ Новий об'єкт", callback_data="obj_new")])
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
     text = f"📅 *Щоденний звіт*\nДата: {fmt_date(chosen_date)}\n\nОберіть об'єкт:"
     if via_callback and update.callback_query:
@@ -519,6 +520,13 @@ async def show_object_buttons(update, context, chosen_date, via_callback=False):
 async def select_object(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if query.data == 'obj_new':
+        context.user_data['awaiting'] = 'new_object_name'
+        await show_or_edit(update,
+            "🏗️ Новий об'єкт.\n\nНапишіть назву об'єкта, наприклад: СЕС Губа 1\n"
+            "Після цього він одразу стане обраним для звіту.",
+            reply_markup=prompt_markup())
+        return SELECT_OBJECT
     obj_id = query.data.replace('obj_', '')
 
     objects = get_objects()
@@ -1714,7 +1722,7 @@ def search_back_markup():
 def _stock_lines(items):
     rows = [(str(i), st.get('name', '—'), f"{st.get('qty', 0)} {st.get('unit', 'шт')}")
             for i, st in enumerate(items, 1)]
-    return make_table(["№", "Матеріал", "Залишок"], rows, [3, 20, 12])
+    return make_table(["№", "Матеріал", "Залишок"], rows, [3, 16, 10])
 
 async def show_stock_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'stock_list')
@@ -1757,8 +1765,41 @@ async def stock_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=search_back_markup(), parse_mode='HTML')
     return STOCK_ACTION
 
+async def new_object_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = (update.effective_message.text or '').strip()
+    if len(name) < 2:
+        await update.effective_message.reply_text(
+            "❌ Назва занадто коротка. Напишіть назву об'єкта, наприклад: СЕС Губа 1",
+            reply_markup=prompt_markup())
+        return SELECT_OBJECT
+    context.user_data.pop('awaiting', None)
+    uid = update.effective_user.id
+    # Якщо такий об'єкт уже є — не дублюємо, а обираємо його
+    existing = next((o for o in get_objects()
+                     if (o.get('name') or '').strip().lower() == name.lower()), None)
+    if existing and existing.get('status') == 'active':
+        obj_id, obj_name = existing['id'], existing['name']
+        await update.effective_message.reply_text(f"ℹ️ Об'єкт «{obj_name}» вже є — обрано його.")
+    else:
+        obj_id = fb_add('objects', {'name': name, 'status': 'active', 'note': 'Додано з бота'})
+        if not obj_id:
+            await update.effective_message.reply_text("❌ Не вдалося зберегти об'єкт. Спробуйте ще раз.", reply_markup=main_keyboard())
+            return MAIN_MENU
+        obj_name = name
+        ms = undo_push(uid, f"Створено об'єкт «{name}»", [{'op': 'delete', 'col': 'objects', 'id': obj_id}])
+        await update.effective_message.reply_text(f"✅ Об'єкт «{name}» додано.", reply_markup=undo_markup(ms))
+    daily = context.user_data.get('daily') or {}
+    daily['objId'] = obj_id
+    daily['objName'] = obj_name
+    context.user_data['daily'] = daily
+    context.user_data['objects'] = get_objects()
+    context.user_data['previous_state'] = SELECT_OBJECT
+    return await ask_workers(update, context)
+
 async def text_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Текст, якого бот не чекав: не мовчимо, а пояснюємо що робити
+    if context.user_data.get('awaiting') == 'new_object_name':
+        return await new_object_text(update, context)
     if context.user_data.get('awaiting') == 'stock_search':
         return await stock_search_text(update, context)
     await update.effective_message.reply_text(
@@ -1794,51 +1835,51 @@ def log_total(log):
     return wage + mat + tr
 
 def format_log_details(log):
-    t = f"📅 {fmt_date(log.get('date'))} | {log.get('objName') or '—'}\n"
-    t += f"✍️ Подав: {log.get('submittedBy') or 'не вказано'}\n"
+    """Картка запису: кожен розділ — таблиця з заголовками. Повертає HTML."""
+    out = [f"<b>📅 {_h(fmt_date(log.get('date')))} · {_h(log.get('objName') or '—')}</b>",
+           f"✍️ Подав: {_h(log.get('submittedBy') or 'не вказано')}"]
     workers = log.get('workers') or []
     materials = log.get('materials') or []
     transport = log.get('transport') or []
     if workers:
-        t += "👷 Робітники:\n"
-        for w in workers:
-            t += f"  • {w.get('name', '')} — {w.get('hrs', 0)}год"
-            if w.get('rate'):
-                t += f" = {fmt_money((w.get('hrs') or 0) * w['rate'])}"
-            t += "\n"
+        rows = [(w.get('name', ''), f"{w.get('hrs', 0)} год",
+                 fmt_money((w.get('hrs') or 0) * w['rate']) if w.get('rate') else '—')
+                for w in workers]
+        out += ["", "<b>👷 Робітники</b>", make_table(["Працівник", "Годин", "Сума"], rows, [14, 7, 9])]
     if materials:
-        t += "📦 Матеріали:\n"
-        for m in materials:
-            t += f"  • {m.get('name', '')} {m.get('qty', '')} {m.get('unit', '')}"
-            if m.get('price'):
-                t += f" = {fmt_money((m.get('qty') or 0) * m['price'])}"
-            t += "\n"
+        rows = [(m.get('name', ''), f"{m.get('qty', '')} {m.get('unit', '')}".strip(),
+                 fmt_money((m.get('qty') or 0) * m['price']) if m.get('price') else '—')
+                for m in materials]
+        out += ["", "<b>📦 Матеріали</b>", make_table(["Матеріал", "К-сть", "Сума"], rows, [14, 7, 9])]
     if transport:
-        t += "🚛 Транспорт:\n"
-        for x in transport:
-            if x.get('qty'):
-                t += f"  • {x.get('name', '')} — {x['qty']} x {fmt_money(x.get('price', 0))} = {fmt_money(x.get('cost', 0))}\n"
-            else:
-                t += f"  • {x.get('name', '')} — {fmt_money(x.get('cost', 0))}\n"
+        rows = [(x.get('name', ''), fmt_money(x.get('cost', 0))) for x in transport]
+        out += ["", "<b>🚛 Транспорт</b>", make_table(["Транспорт", "Сума"], rows, [18, 9])]
     if log.get('desc'):
-        t += f"📝 {log['desc']}\n"
-    t += f"💰 Разом за запис: {fmt_money(log_total(log))}\n"
-    return t
+        out += ["", f"📝 {_h(log['desc'])}"]
+    out += ["", f"💰 <b>Разом за запис: {_h(fmt_money(log_total(log)))}</b>"]
+    return "\n".join(out)
 
 def render_object_report(obj_logs):
     obj_logs = sorted(obj_logs, key=lambda l: str(l.get('date') or ''), reverse=True)
     name = obj_logs[0].get('objName') or "Об'єкт"
     grand = sum(log_total(l) for l in obj_logs)
-    rows = [(fmt_date(l.get('date')), l.get('submittedBy') or '—', fmt_money(log_total(l)))
+    rows = [(fmt_date(l.get('date')), l.get('submittedBy') or 'не вказано', fmt_money(log_total(l)))
             for l in obj_logs[:15]]
     parts = [f"<b>📊 Звіт по об'єкту: {_h(name)}</b>",
              f"Записів: {len(obj_logs)} | Разом: <b>{_h(fmt_money(grand))}</b>",
-             "", make_table(["Дата", "Подав", "Сума"], rows, [10, 12, 12])]
+             "", make_table(["Дата", "Подав", "Сума"], rows, [10, 10, 9])]
     if len(obj_logs) > 15:
         parts.append(f"… показано 15 з {len(obj_logs)}")
-    details = "\n──────────\n".join(format_log_details(l) for l in obj_logs[:5])
     parts.append("\n<b>Деталі останніх записів:</b>")
-    parts.append(_h(details[:2800]))
+    shown = 0
+    for l in obj_logs[:5]:
+        card = format_log_details(l)
+        if len("\n".join(parts)) + len(card) > 3500:
+            break
+        parts.append("\n" + card)
+        shown += 1
+    if shown < len(obj_logs):
+        parts.append(f"\n… ще {len(obj_logs) - shown} записів: натисніть «Мої записи»")
     return "\n".join(parts)
 
 # ── ЗВІТ ПО ОБ'ЄКТУ ───────────────────────────────────────────
@@ -1872,7 +1913,7 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
         text = render_object_report(obj_logs)
 
         nav_push(context, 'report_detail')
-        await query.edit_message_text(text, reply_markup=back_markup())
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=back_markup())
         return HISTORY_LIST
 
     if data.startswith('hist_'):
@@ -1881,10 +1922,8 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
         log = next((l for l in logs if l['id'] == log_id), None)
 
         if log:
-            text = f"📋 {fmt_date(log.get('date'))} — {log.get('objName')}\n\n"
-            text += f"Введено: {log.get('submittedBy')}\n"
             nav_push(context, 'history_detail')
-            await query.edit_message_text(text, reply_markup=back_markup())
+            await query.edit_message_text(format_log_details(log), parse_mode='HTML', reply_markup=back_markup())
 
         return HISTORY_LIST
 
