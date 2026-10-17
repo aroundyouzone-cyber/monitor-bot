@@ -371,7 +371,7 @@ async def undo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(text)
 
 async def flow_cancel(update, context):
-    for k in ('awaiting', 'pending_material', 'pending_transport', 'pending_worker', 'pending_receipt'):
+    for k in ('awaiting', 'pending_material', 'pending_transport', 'pending_worker', 'pending_receipt', 'wiz'):
         context.user_data.pop(k, None)
     return await go_main_menu(update, context)
 
@@ -1099,6 +1099,171 @@ async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return RECEIPT_PHOTO
 
+# ── ПОКРОКОВЕ ВВЕДЕННЯ МАТЕРІАЛУ (чек / накладна) ─────────────────
+WIZ_UNITS = [["м", "шт"], ["л", "кг"], ["інше"]]
+
+def _wiz_nav():
+    return nav_row("wiz_back")
+
+def _num(t):
+    try:
+        return float(str(t).replace(',', '.').strip())
+    except Exception:
+        return None
+
+def parse_quick_line(line):
+    """'Кабель ВВГ | 5×16 | 50 м | 56' або 'Кабель ВВГ | 50 м | 56' → item або None"""
+    parts = [p.strip() for p in line.split('|')]
+    if len(parts) == 3:
+        name, spec, qu, price_s = parts[0], '', parts[1], parts[2]
+    elif len(parts) == 4:
+        name, spec, qu, price_s = parts[0], parts[1], parts[2], parts[3]
+    else:
+        return None
+    m = re.match(r'^(\d+(?:[.,]\d+)?)\s*(.*)$', qu)
+    price = _num(price_s)
+    if not name or not m or price is None:
+        return None
+    qty = _num(m.group(1))
+    unit = (m.group(2) or 'шт').strip()
+    full_name = f"{name} {spec}".strip()
+    return {'name': full_name, 'qty': qty, 'unit': unit, 'price': price, 'amount': qty * price}
+
+def _wiz_render(update, text, buttons):
+    return show_or_edit(update, text, reply_markup=InlineKeyboardMarkup(buttons + [_wiz_nav()]))
+
+async def wiz_ask_name(update, context):
+    context.user_data['wiz'] = {'step': 'name', 'item': {}}
+    text = ("✍️ Введення матеріалу.\n\n"
+            "1️⃣ Напишіть назву, наприклад: Кабель ВВГ\n\n"
+            "Або одним рядком з рисками:\n"
+            "Кабель ВВГ | 5×16 | 50 м | 56\n"
+            "(назва | характеристика | кількість одиниця | ціна)")
+    await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel")]]))
+    return RECEIPT_PHOTO
+
+async def wiz_ask_spec(update, context):
+    context.user_data['wiz']['step'] = 'spec'
+    text = ("2️⃣ Характеристика (необов'язково).\n"
+            "Для кабелю: жили × перетин, наприклад 5×16.\n"
+            "Для інших матеріалів можна пропустити.")
+    await _wiz_render(update, text, [[InlineKeyboardButton("⏭ Пропустити", callback_data="wiz_skip_spec")]])
+    return RECEIPT_PHOTO
+
+async def wiz_ask_unit(update, context):
+    context.user_data['wiz']['step'] = 'unit'
+    buttons = [[InlineKeyboardButton(u, callback_data=f"wiz_unit_{u}") for u in row] for row in WIZ_UNITS]
+    await _wiz_render(update, "3️⃣ Одиниця виміру:\n(м — погонний метр, шт — штуки, л — літри, кг — кілограми)", buttons)
+    return RECEIPT_PHOTO
+
+async def wiz_ask_unit_text(update, context):
+    context.user_data['wiz']['step'] = 'unit_text'
+    await _wiz_render(update, "Напишіть одиницю виміру, наприклад: пач, рулон, пог.м", [])
+    return RECEIPT_PHOTO
+
+async def wiz_ask_qty(update, context):
+    wiz = context.user_data['wiz']
+    wiz['step'] = 'qty'
+    await _wiz_render(update, f"4️⃣ Скільки? Напишіть число, наприклад 50.\nОдиниця: {wiz['item'].get('unit', 'шт')}", [])
+    return RECEIPT_PHOTO
+
+async def wiz_ask_price(update, context):
+    wiz = context.user_data['wiz']
+    wiz['step'] = 'price'
+    unit = wiz['item'].get('unit', 'шт')
+    await _wiz_render(update, f"5️⃣ Ціна за одну одиницю ({unit}), грн.\nНаприклад 56. Якщо невідома — напишіть 0.", [])
+    return RECEIPT_PHOTO
+
+async def wiz_confirm(update, context):
+    wiz = context.user_data['wiz']
+    wiz['step'] = 'confirm'
+    it = wiz['item']
+    amount = it['qty'] * it['price']
+    text = (f"📋 Перевірте:\n\n"
+            f"{it['name']}\n"
+            f"Кількість: {it['qty']:g} {it['unit']}\n"
+            f"Ціна: {fmt_money(it['price'])} за {it['unit']}\n"
+            f"Сума: {fmt_money(amount)}")
+    buttons = [[InlineKeyboardButton("✅ Записати", callback_data="wiz_save")],
+               [InlineKeyboardButton("✏️ Почати спочатку", callback_data="wiz_restart")]]
+    await _wiz_render(update, text, buttons)
+    return RECEIPT_PHOTO
+
+async def wiz_save(update, context):
+    item = dict(context.user_data['wiz']['item'])
+    item['amount'] = item['qty'] * item['price']
+    context.user_data.pop('wiz', None)
+    receipt = context.user_data.get('receipt') or {'supplier': '', 'items': []}
+    items = list(receipt.get('items', [])) + [item]
+    receipt['items'] = items
+    receipt['total'] = sum(i.get('amount', 0) for i in items)
+    context.user_data['receipt'] = receipt
+    return await show_receipt_preview(update, context)
+
+async def wiz_text(update, context):
+    wiz = context.user_data['wiz']
+    step = wiz['step']
+    t = (update.message.text or '').strip()
+    it = wiz['item']
+    if step == 'name':
+        if not t:
+            return await wiz_ask_name(update, context)
+        it['name'] = t
+        return await wiz_ask_spec(update, context)
+    if step == 'spec':
+        it['spec'] = '' if t in ('-', '') else t
+        it['name'] = f"{it.get('name', '')} {it['spec']}".strip() if it['spec'] else it.get('name', '')
+        return await wiz_ask_unit(update, context)
+    if step == 'unit_text':
+        if not t:
+            return await wiz_ask_unit_text(update, context)
+        it['unit'] = t
+        return await wiz_ask_qty(update, context)
+    if step == 'qty':
+        v = _num(t)
+        if v is None or v <= 0:
+            await update.effective_message.reply_text("❌ Напишіть число більше 0, наприклад 50")
+            return RECEIPT_PHOTO
+        it['qty'] = v
+        return await wiz_ask_price(update, context)
+    if step == 'price':
+        v = _num(t)
+        if v is None or v < 0:
+            await update.effective_message.reply_text("❌ Напишіть ціну числом, наприклад 56 (або 0)")
+            return RECEIPT_PHOTO
+        it['price'] = v
+        return await wiz_confirm(update, context)
+    return await wiz_ask_name(update, context)
+
+async def wiz_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == 'wiz_restart':
+        return await wiz_ask_name(update, context)
+    if data == 'wiz_save':
+        return await wiz_save(update, context)
+    if data == 'wiz_skip_spec':
+        return await wiz_ask_unit(update, context)
+    if data == 'wiz_unit_інше' or data == 'wiz_unit_other':
+        return await wiz_ask_unit_text(update, context)
+    if data.startswith('wiz_unit_'):
+        context.user_data['wiz']['item']['unit'] = data.replace('wiz_unit_', '')
+        return await wiz_ask_qty(update, context)
+    if data == 'wiz_back':
+        wiz = context.user_data.get('wiz')
+        if not wiz:
+            return await wiz_ask_name(update, context)
+        prev = {'spec': wiz_ask_name, 'unit': wiz_ask_spec, 'unit_text': wiz_ask_unit,
+                'qty': wiz_ask_unit, 'price': wiz_ask_qty, 'confirm': wiz_ask_price}
+        step = wiz['step']
+        if step == 'name':
+            context.user_data.pop('wiz', None)
+            return await wiz_ask_name(update, context)
+        fn = prev.get(step, wiz_ask_name)
+        return await fn(update, context)
+    return RECEIPT_PHOTO
+
 async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo of receipt"""
     if update.message.text == '🔙 Назад':
@@ -1159,47 +1324,36 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Claude receipt error: {e}")
                 await update.effective_message.reply_text(
                     "⚠️ Помилка розпізнавання. Введіть вручну:\n"
-                    "`Назва к-сть одиниця ціна`",
+                    "назву матеріалу — далі бот запитає решту по кроках",
                     parse_mode='Markdown'
                 )
                 return RECEIPT_PHOTO
         else:
             await update.effective_message.reply_text(
                 "⚠️ Розпізнавання недоступне (немає API ключа Claude).\n"
-                "Введіть вручну:\n`Назва к-сть одиниця ціна`",
+                "Напишіть назву матеріалу — далі бот запитає решту по кроках",
                 parse_mode='Markdown'
             )
             return RECEIPT_PHOTO
 
     elif update.message.text:
-        # Manual input
+        if context.user_data.get('wiz'):
+            return await wiz_text(update, context)
         text = update.message.text.strip()
-        parts = text.split()
-        try:
-            nums = [i for i, p in enumerate(parts) if p.replace(',','').replace('.','').isdigit()]
-            if len(nums) >= 1:
-                # Last numbers are qty and price
-                price_idx = nums[-1]
-                qty_idx = nums[-2] if len(nums) >= 2 else nums[-1]
-                price = float(parts[price_idx].replace(',','.'))
-                qty = float(parts[qty_idx].replace(',','.')) if len(nums) >= 2 else 1
-                unit = parts[qty_idx+1] if qty_idx+1 < price_idx else 'шт'
-                name = ' '.join(parts[:qty_idx])
-
-                context.user_data['receipt'] = {
-                    'supplier': '',
-                    'items': [{'name': name, 'qty': qty, 'unit': unit, 'price': price, 'amount': qty*price}],
-                    'total': qty * price
-                }
+        if '|' in text:
+            items = [parse_quick_line(l) for l in text.splitlines() if l.strip()]
+            if items and all(items):
+                receipt = context.user_data.get('receipt') or {'supplier': '', 'items': []}
+                receipt['items'] = list(receipt.get('items', [])) + items
+                receipt['total'] = sum(i.get('amount', 0) for i in receipt['items'])
+                context.user_data['receipt'] = receipt
                 return await show_receipt_preview(update, context)
-        except Exception as e:
-            pass
-
-        await update.effective_message.reply_text(
-            "❌ Не зрозумів формат.\nСпробуйте: `Кабель ВВГ 50 м 38`",
-            parse_mode='Markdown'
-        )
-        return RECEIPT_PHOTO
+            await update.effective_message.reply_text(
+                "❌ Не вийшло розібрати рядок.\nПриклад: Кабель ВВГ | 5×16 | 50 м | 56")
+            return RECEIPT_PHOTO
+        # Звичайний текст — починаємо покрокове введення з цією назвою
+        context.user_data['wiz'] = {'step': 'spec', 'item': {'name': text}}
+        return await wiz_ask_spec(update, context)
 
     return RECEIPT_PHOTO
 
@@ -2029,6 +2183,7 @@ def main():
             ],
             DAILY_CONFIRM: [CallbackQueryHandler(daily_confirm_callback)],
             RECEIPT_PHOTO: [
+                CallbackQueryHandler(wiz_callback, pattern=r'^wiz_'),
                 CallbackQueryHandler(receipt_target_callback),
                 MessageHandler(filters.PHOTO | filters.TEXT, receipt_photo)
             ],
