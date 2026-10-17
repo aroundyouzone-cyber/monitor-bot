@@ -1069,6 +1069,15 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     if query.data == 'daily_save':
         daily = context.user_data['daily']
+        # Запис без об'єкта не зберігаємо: перевіряємо, що об'єкт обрано і він існує
+        obj_ok = bool(daily.get('objId')) and any(o.get('id') == daily.get('objId') for o in get_objects())
+        if not obj_ok:
+            await query.edit_message_text(
+                "⚠️ Запис не збережено: не вибрано об'єкт (або він видалений).\n\n"
+                "Натисніть «📅 Щоденний звіт», оберіть об'єкт і внесіть запис знову.")
+            context.user_data.pop('daily', None)
+            await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
+            return MAIN_MENU
         daily['submittedBy'] = update.effective_user.first_name or update.effective_user.username or 'Невідомо'
         daily['submittedById'] = update.effective_user.id
         doc_id = fb_add('dailyLogs', daily)
@@ -1828,6 +1837,20 @@ def make_table(headers, rows, widths):
     return "<pre>" + _h("\n".join(lines)) + "</pre>"
 
 # ── ДЕТАЛІ ЗАПИСУ ДЛЯ ЗВІТУ ─────────────────────────────────────
+def log_obj_name(log):
+    """Назва об'єкта для запису: якщо в записі її немає — шукаємо за id, інакше «без об'єкта»."""
+    name = (log.get('objName') or '').strip()
+    if name:
+        return name
+    oid = log.get('objId')
+    if oid:
+        o = next((o for o in get_objects() if o.get('id') == oid), None)
+        if o and o.get('name'):
+            return o['name']
+        # запис посилається на об'єкт, якого вже немає (видалений або перейменований)
+        return f"об'єкт не знайдено (id {oid[:6]})"
+    return "без об'єкта (запис створено без об'єкта)"
+
 def log_total(log):
     wage = sum((w.get('hrs') or 0) * (w.get('rate') or 0) for w in (log.get('workers') or []))
     mat = sum((m.get('qty') or 0) * (m.get('price') or 0) for m in (log.get('materials') or []))
@@ -1836,7 +1859,7 @@ def log_total(log):
 
 def format_log_details(log):
     """Картка запису: кожен розділ — таблиця з заголовками. Повертає HTML."""
-    out = [f"<b>📅 {_h(fmt_date(log.get('date')))} · {_h(log.get('objName') or '—')}</b>",
+    out = [f"<b>📅 {_h(fmt_date(log.get('date')))} · {_h(log_obj_name(log))}</b>",
            f"✍️ Подав: {_h(log.get('submittedBy') or 'не вказано')}"]
     workers = log.get('workers') or []
     materials = log.get('materials') or []
@@ -1861,7 +1884,7 @@ def format_log_details(log):
 
 def render_object_report(obj_logs):
     obj_logs = sorted(obj_logs, key=lambda l: str(l.get('date') or ''), reverse=True)
-    name = obj_logs[0].get('objName') or "Об'єкт"
+    name = log_obj_name(obj_logs[0])
     grand = sum(log_total(l) for l in obj_logs)
     rows = [(fmt_date(l.get('date')), l.get('submittedBy') or 'не вказано', fmt_money(log_total(l)))
             for l in obj_logs[:15]]
@@ -2027,7 +2050,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE, via_c
             await update.effective_message.reply_text(msg, reply_markup=main_keyboard())
         return MAIN_MENU
 
-    buttons = [[InlineKeyboardButton(f"📅 {fmt_date(l.get('date'))} — {l.get('objName')}", callback_data=f"hist_{l['id']}")] for l in logs[:10]]
+    buttons = [[InlineKeyboardButton(f"📅 {fmt_date(l.get('date'))} — {log_obj_name(l)}", callback_data=f"hist_{l['id']}")] for l in logs[:10]]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
 
     msg = "📜 *Мої записи:*"
