@@ -180,6 +180,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_reset(context)
     if is_owner(uid):
         fb_set('settings', 'admin', {'chat_id': update.effective_chat.id})
+    # ── заставка: відео splash.mp4 (лежить поруч із bot.py) ──
+    try:
+        splash_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'splash.mp4')
+        if os.path.exists(splash_path):
+            with open(splash_path, 'rb') as f:
+                await update.effective_message.reply_animation(animation=f, caption="🏗️ Моніторинг виробництва + ІТР")
+    except Exception as e:
+        logging.warning(f"Заставку не надіслано: {e}")
     await update.effective_message.reply_text(
         f"👋 Привіт, {name}!\n\n"
         f"🏗️ *Моніторинг виробництва + ІТР*\n\n"
@@ -264,6 +272,112 @@ async def go_main_menu(update, context):
 def back_markup():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]])
 
+def prompt_markup():
+    # Кнопки під кожним текстовим запитанням бота
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu"),
+        InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel"),
+    ]])
+
+def undo_markup(ms):
+    if not ms:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Відмінити цю дію", callback_data=f"undo_{ms}")]])
+
+# ── ЖУРНАЛ ВІДМІНИ (Firebase: settings/undo_<user_id>) ────────
+UNDO_LIMIT = 30
+
+def undo_push(uid, desc, ops):
+    """Записати дію в журнал. ops — список змін, які треба зробити для відміни.
+    Повертає мітку дії (для кнопки) або None."""
+    if not db or not ops or not uid:
+        return None
+    try:
+        ref = db.collection('settings').document(f'undo_{uid}')
+        snap = ref.get()
+        items = (snap.to_dict() or {}).get('items', []) if snap.exists else []
+        ms = int(time.time() * 1000)
+        if items and ms <= items[-1].get('ms', 0):
+            ms = items[-1]['ms'] + 1          # мітки завжди зростають, щоб кнопка знала свою дію
+        items.append({'desc': desc, 'ops': ops, 'ms': ms})
+        ref.set({'items': items[-UNDO_LIMIT:]})
+        return ms
+    except Exception as e:
+        logger.error(f"undo_push error: {e}")
+        return None
+
+def undo_pop(uid, expect_ms=None):
+    """Зняти останню дію з журналу. Якщо expect_ms заданий — знімає лише тоді, коли це та сама дія."""
+    if not db:
+        return None
+    try:
+        ref = db.collection('settings').document(f'undo_{uid}')
+        snap = ref.get()
+        items = (snap.to_dict() or {}).get('items', []) if snap.exists else []
+        if not items:
+            return None
+        if expect_ms is not None and items[-1].get('ms') != expect_ms:
+            return 'mismatch'
+        last = items.pop()
+        ref.set({'items': items})
+        return last
+    except Exception as e:
+        logger.error(f"undo_pop error: {e}")
+        return None
+
+def undo_execute(entry):
+    ok = True
+    for op in reversed(entry.get('ops', [])):
+        if op.get('op') == 'delete':
+            ok = fb_delete(op['col'], op['id']) and ok
+        elif op.get('op') == 'restore':
+            ok = fb_set(op['col'], op['id'], op['data']) and ok
+    return ok
+
+async def do_undo(update, context, expect_ms=None):
+    uid = update.effective_user.id
+    entry = undo_pop(uid, expect_ms)
+    if entry == 'mismatch':
+        return "ℹ️ Цю дію вже не можна відмінити: після неї були інші дії. Використайте /undo для останньої."
+    if not entry:
+        return "ℹ️ Немає дій, які можна відмінити."
+    ok = undo_execute(entry)
+    text = f"↩️ Відмінено: {entry.get('desc', 'дію')}"
+    if not ok:
+        text += "\n⚠️ Частину змін не вдалося відмінити. Перевірте зв'язок з Firebase."
+    return text
+
+async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = await do_undo(update, context)
+    await update.effective_message.reply_text(text)
+
+async def undo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        ms = int(query.data.replace('undo_', ''))
+    except ValueError:
+        ms = None
+    text = await do_undo(update, context, expect_ms=ms)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        pass
+    await query.message.reply_text(text)
+
+async def flow_cancel(update, context):
+    for k in ('awaiting', 'pending_material', 'pending_transport', 'pending_worker', 'pending_receipt'):
+        context.user_data.pop(k, None)
+    return await go_main_menu(update, context)
+
+async def flow_cancel_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    return await flow_cancel(update, context)
+
+async def flow_cancel_text(update, context):
+    return await flow_cancel(update, context)
+
 async def render_history(update, context):
     return await show_history(update, context, via_callback=True)
 
@@ -301,6 +415,8 @@ async def back_to_menu(update, context):
     query = update.callback_query
     if query:
         await query.answer()
+    for _k in ('awaiting', 'pending_material', 'pending_transport', 'pending_worker'):
+        context.user_data.pop(_k, None)
     stack = context.user_data.setdefault('nav', [])
     if stack:
         stack.pop()                                   # поточний екран
@@ -319,10 +435,13 @@ def _with_back(states):
     # (без pattern) перехоплюють back_to_menu і він не спрацьовує
     back_cb = CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$')
     back_txt = MessageHandler(filters.Regex('^🔙 Назад$'), back_text_handler)
+    cancel_cb = CallbackQueryHandler(flow_cancel_callback, pattern='^flow_cancel$')
+    cancel_txt = MessageHandler(filters.Regex('^❌ Скасувати$'), flow_cancel_text)
+    cancel_cmd = CommandHandler('cancel', flow_cancel_text)
     # Кнопки головного меню (reply-клавіатура) працюють з будь-якого кроку
     menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Фото чека/накладної|📦 Склад|📊 Звіт по об\'єкту|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
     menu_h = MessageHandler(menu_re, main_menu_handler)
-    return {k: [back_cb, back_txt, menu_h, *v] for k, v in states.items()}
+    return {k: [back_cb, cancel_cb, back_txt, cancel_txt, cancel_cmd, menu_h, *v] for k, v in states.items()}
 
 # ── ЩОДЕННИЙ ЗВІТ ────────────────────────────────────────────
 async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -534,7 +653,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await show_object_buttons(update, context, chosen_date, via_callback=False)
         except:
-            await update.effective_message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
+            await update.effective_message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)", reply_markup=prompt_markup())
             return SELECT_DATE
 
     if awaiting == 'worker_hrs_input':
@@ -551,7 +670,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await ask_workers(update, context)
         except:
-            await update.effective_message.reply_text("❌ Введіть число, наприклад: 8 або 7.5")
+            await update.effective_message.reply_text("❌ Введіть число, наприклад: 8 або 7.5", reply_markup=prompt_markup())
             return DAILY_WORKERS
 
     if awaiting == 'worker_manual':
@@ -576,11 +695,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     failed.append(entry)
             context.user_data.pop('awaiting', None)
             if failed:
-                await update.effective_message.reply_text(f"⚠️ Не розпізнано: {', '.join(failed)}")
+                await update.effective_message.reply_text(f"⚠️ Не розпізнано: {', '.join(failed)}", reply_markup=prompt_markup())
             if added:
                 return await ask_workers(update, context)
             else:
-                await update.effective_message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.")
+                await update.effective_message.reply_text("❌ Формат: Петренко I.I. 8 (або Петренко 8 280). Кілька — через кому або з нового рядка.", reply_markup=prompt_markup())
                 return DAILY_WORKERS
 
     if awaiting == 'material_stock_qty':
@@ -597,11 +716,14 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 'sku': ''
             })
             stock_data = dict(mat.get('stock_data', {}))
+            undo_ops = []
             if mat.get('stock_id') and stock_data:
+                prev_stock = dict(stock_data); prev_stock['qty'] = available
                 stock_data['qty'] = new_qty
                 fb_set('matStock', mat['stock_id'], stock_data)
+                undo_ops.append({'op': 'restore', 'col': 'matStock', 'id': mat['stock_id'], 'data': prev_stock})
                 daily = context.user_data.get('daily', {})
-                fb_add('stockMoves', {
+                move_id = fb_add('stockMoves', {
                     'matId': mat['stock_id'],
                     'type': 'out',
                     'qty': qty,
@@ -609,13 +731,17 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     'date': daily.get('date') or today_str(),
                     'note': f"Бот · щоденний звіт · {daily.get('objName','')}".strip(' ·')
                 })
+                if move_id:
+                    undo_ops.append({'op': 'delete', 'col': 'stockMoves', 'id': move_id})
             context.user_data.pop('pending_material', None)
             context.user_data.pop('awaiting', None)
             warn = "\n⚠️ Залишок став від'ємним!" if new_qty < 0 else ""
-            await update.effective_message.reply_text(f"✅ Списано {qty} {mat.get('unit','шт')}. Залишок: {new_qty}{warn}")
+            ms = undo_push(update.effective_user.id,
+                           f"Списання: {mat.get('name', '')} {qty} {mat.get('unit', 'шт')}", undo_ops)
+            await update.effective_message.reply_text(f"✅ Списано {qty} {mat.get('unit','шт')}. Залишок: {new_qty}{warn}", reply_markup=undo_markup(ms))
             return await ask_materials(update, context)
         except:
-            await update.effective_message.reply_text("❌ Введіть число, наприклад: 10")
+            await update.effective_message.reply_text("❌ Введіть число, наприклад: 10", reply_markup=prompt_markup())
             return DAILY_MATERIALS
 
     if awaiting == 'material_name':
@@ -623,7 +749,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['pending_material'] = {'name': text}
         await update.effective_message.reply_text(
             f"📦 *{text}*\n\nВведіть кількість та одиницю (наприклад: 50 м або 10 шт):",
-            parse_mode='Markdown'
+            parse_mode='Markdown', reply_markup=prompt_markup()
         )
         context.user_data['awaiting'] = 'material_qty'
         return DAILY_MATERIALS
@@ -638,12 +764,12 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             mat['unit'] = unit
             context.user_data['pending_material'] = mat
             await update.effective_message.reply_text(
-                f"💰 Ціна за {unit} (введіть 0 якщо невідома):"
+                f"💰 Ціна за {unit} (введіть 0 якщо невідома):", reply_markup=prompt_markup()
             )
             context.user_data['awaiting'] = 'material_price'
             return DAILY_MATERIALS
         except:
-            await update.effective_message.reply_text("❌ Формат: 50 м або 10")
+            await update.effective_message.reply_text("❌ Формат: 50 м або 10", reply_markup=prompt_markup())
             return DAILY_MATERIALS
 
     if awaiting == 'material_price':
@@ -657,12 +783,12 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await ask_materials(update, context)
         except:
-            await update.effective_message.reply_text("❌ Введіть число (ціну)")
+            await update.effective_message.reply_text("❌ Введіть число (ціну)", reply_markup=prompt_markup())
             return DAILY_MATERIALS
 
     if awaiting == 'transport_name':
         context.user_data['pending_transport'] = {'name': text}
-        await update.effective_message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):")
+        await update.effective_message.reply_text("🛣 Введіть пробіг (км) або мотогодини (наприклад: 120):", reply_markup=prompt_markup())
         context.user_data['awaiting'] = 'transport_qty'
         return DAILY_TRANSPORT
 
@@ -672,11 +798,11 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             tr = context.user_data.get('pending_transport', {})
             tr['qty'] = qty
             context.user_data['pending_transport'] = tr
-            await update.effective_message.reply_text("💰 Ціна за одиницю (₴/км або ₴/год), введіть 0 якщо невідома:")
+            await update.effective_message.reply_text("💰 Ціна за одиницю (₴/км або ₴/год), введіть 0 якщо невідома:", reply_markup=prompt_markup())
             context.user_data['awaiting'] = 'transport_price'
             return DAILY_TRANSPORT
         except:
-            await update.effective_message.reply_text("❌ Введіть число, наприклад: 120")
+            await update.effective_message.reply_text("❌ Введіть число, наприклад: 120", reply_markup=prompt_markup())
             return DAILY_TRANSPORT
 
     if awaiting == 'transport_price':
@@ -690,7 +816,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop('awaiting', None)
             return await ask_transport(update, context)
         except:
-            await update.effective_message.reply_text("❌ Введіть число (ціну)")
+            await update.effective_message.reply_text("❌ Введіть число (ціну)", reply_markup=prompt_markup())
             return DAILY_TRANSPORT
 
     if awaiting == 'daily_desc':
@@ -700,7 +826,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Fallback for unexpected text
     phase = context.user_data.get('daily_phase', 'workers')
-    await update.effective_message.reply_text("⚠️ Скористайтесь кнопками вище, або натисніть відповідну кнопку зі списку.")
+    await update.effective_message.reply_text("⚠️ Скористайтесь кнопками вище, або натисніть відповідну кнопку зі списку.", reply_markup=prompt_markup())
     if phase == 'materials':
         return DAILY_MATERIALS
     if phase == 'transport':
@@ -769,7 +895,7 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("📦 Оберіть матеріал зі складу:", reply_markup=InlineKeyboardMarkup(buttons))
         return DAILY_MATERIALS
     if data == 'mat_manual':
-        await query.edit_message_text("📦 Введіть назву матеріалу:")
+        await query.edit_message_text("📦 Введіть назву матеріалу:", reply_markup=prompt_markup())
         context.user_data['awaiting'] = 'material_name'
         return DAILY_MATERIALS
     if data.startswith('matsel_'):
@@ -788,7 +914,8 @@ async def materials_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         }
         await query.edit_message_text(
             f"📦 *{stock.get('name','')}*\nНаявно: {stock.get('qty',0)} {stock.get('unit','шт')}\n\nВведіть кількість, яку використали:",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=prompt_markup()
         )
         context.user_data['awaiting'] = 'material_stock_qty'
         return DAILY_MATERIALS
@@ -833,13 +960,13 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if data == 'tr_done':
         nav_push(context, 'desc')
-        await query.edit_message_text("📝 Коротко опишіть що зробили за день (або натисніть /skip):")
+        await query.edit_message_text("📝 Коротко опишіть що зробили за день (або натисніть /skip):", reply_markup=prompt_markup())
         context.user_data['awaiting'] = 'daily_desc'
         return DAILY_DESC
     if data == 'tr_save':
         return await confirm_daily(update, context)
     if data == 'tr_add':
-        await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):")
+        await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):", reply_markup=prompt_markup())
         context.user_data['awaiting'] = 'transport_name'
         return DAILY_TRANSPORT
 
@@ -917,11 +1044,15 @@ async def daily_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
         doc_id = fb_add('dailyLogs', daily)
 
         if doc_id:
+            ms = undo_push(update.effective_user.id,
+                           f"Щоденний звіт {fmt_date(daily['date'])} · {daily.get('objName', '')}",
+                           [{'op': 'delete', 'col': 'dailyLogs', 'id': doc_id}])
             await query.edit_message_text(
                 f"✅ *Збережено!*\n\n"
                 f"📅 {fmt_date(daily['date'])} — {daily.get('objName', '')}\n"
                 f"Запис у Firebase ✅",
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=undo_markup(ms)
             )
         else:
             await query.edit_message_text("❌ Помилка збереження. Перевірте Firebase.")
@@ -1193,7 +1324,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         return MAIN_MENU
 
     if data == 'rec_docnum':
-        await query.edit_message_text("🔖 Введіть номер накладної / рахунку / чека (текстом):")
+        await query.edit_message_text("🔖 Введіть номер накладної / рахунку / чека (текстом):", reply_markup=prompt_markup())
         return RECEIPT_CONFIRM
 
     if data == 'rec_stock':
@@ -1211,6 +1342,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         supplier_id = ensure_supplier(receipt.get('supplier', ''))
         saved = 0
         failed = []
+        undo_ops = []
         for item in receipt.get('items', []):
             existing = None
             stocks = fb_get_all('matStock')
@@ -1219,6 +1351,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     existing = s
                     break
 
+            prev_stock = dict(existing) if existing else None
             if existing:
                 existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
                 if supplier_id and not existing.get('supplierId'):
@@ -1238,7 +1371,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'min': 0, 'cat': cat, 'sku': '', 'note': ''
                 })
             if mat_id:
-                fb_add('stockMoves', {
+                move_id = fb_add('stockMoves', {
                     'matId': mat_id,
                     'type': 'in',
                     'qty': item.get('qty', 0),
@@ -1246,6 +1379,12 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
                     'date': receipt.get('date') or today_str(),
                     'note': f"Бот · чек{(' · ' + receipt.get('supplier')) if receipt.get('supplier') else ''}{doc_number_suffix(receipt)}"
                 })
+                if move_id:
+                    undo_ops.append({'op': 'delete', 'col': 'stockMoves', 'id': move_id})
+                if prev_stock is not None:
+                    undo_ops.append({'op': 'restore', 'col': 'matStock', 'id': mat_id, 'data': prev_stock})
+                else:
+                    undo_ops.append({'op': 'delete', 'col': 'matStock', 'id': mat_id})
                 saved += 1
             else:
                 failed.append(item.get('name', '?'))
@@ -1253,7 +1392,8 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         text = f"✅ Додано на склад ({'🛠️ інструмент/спецодяг' if cat else '📦 матеріали'}): {saved} позицій"
         if failed:
             text += f"\n❌ Не вдалося зберегти ({len(failed)}): {', '.join(md_safe(n) for n in failed)}\nСпробуйте ще раз через кілька хвилин або перевірте зв'язок з Firebase."
-        await query.edit_message_text(text)
+        ms = undo_push(update.effective_user.id, f"Чек → склад: {saved} поз.", undo_ops)
+        await query.edit_message_text(text, reply_markup=undo_markup(ms))
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
@@ -1290,6 +1430,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         saved = 0
         failed = []
         stock_note = 0
+        undo_ops = []
         for item in receipt.get('items', []):
             purchase = {
                 'name': item['name'],
@@ -1305,6 +1446,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             }
             purch_id = fb_add('purchases', purchase)
             if purch_id:
+                undo_ops.append({'op': 'delete', 'col': 'purchases', 'id': purch_id})
                 saved += 1
                 if category == 'materials':
                     stock_note += 1
@@ -1316,7 +1458,8 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             text += f"\n💡 {stock_note} з них — матеріалів. Не забудьте їх додати в Склад!"
         if failed:
             text += f"\n❌ Не вдалося зберегти ({len(failed)}): {', '.join(md_safe(n) for n in failed)}"
-        await query.edit_message_text(text)
+        ms = undo_push(update.effective_user.id, f"Закупівлі ({cat_labels.get(category, category)}): {saved} поз.", undo_ops)
+        await query.edit_message_text(text, reply_markup=undo_markup(ms))
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
@@ -1337,6 +1480,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         receipt = context.user_data.get('receipt', {})
         saved = 0
         failed = []
+        undo_ops = []
         for item in receipt.get('items', []):
             log = {
                 'date': receipt.get('date') or today_str(),
@@ -1357,14 +1501,16 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
             }
             log_id = fb_add('dailyLogs', log)
             if log_id:
+                undo_ops.append({'op': 'delete', 'col': 'dailyLogs', 'id': log_id})
                 saved += 1
             else:
                 failed.append(item.get('name', '?'))
 
         text = f"✅ Додано до щоденних звітів: {saved} записів"
+        ms = undo_push(update.effective_user.id, f"Чек → щоденні звіти: {saved} зап.", undo_ops)
         if failed:
             text += f"\n❌ Не вдалось ({len(failed)}): {', '.join(md_safe(n) for n in failed)}"
-        await query.edit_message_text(text)
+        await query.edit_message_text(text, reply_markup=undo_markup(ms))
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
@@ -1579,11 +1725,11 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             chosen_date = date(y, m, d).isoformat()
             context.user_data['plan_date'] = chosen_date
             context.user_data['previous_state'] = PLAN_DATE
-            await update.effective_message.reply_text(f"📝 Введіть текст нагадування:")
+            await update.effective_message.reply_text(f"📝 Введіть текст нагадування:", reply_markup=prompt_markup())
             context.user_data['awaiting'] = 'plan_text'
             return PLAN_TEXT
         except:
-            await update.effective_message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)")
+            await update.effective_message.reply_text("❌ Формат дати: ДД.ММ.РРРР (наприклад: 28.08.2026)", reply_markup=prompt_markup())
             return PLAN_DATE
 
     if data == 'plandate_today':
@@ -1592,7 +1738,7 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         chosen_date = (date.today() + timedelta(days=1)).isoformat()
     elif data == 'plandate_custom':
         context.user_data['previous_state'] = PLAN_DATE
-        await query.edit_message_text("✏️ Введіть дату (ДД.ММ.РРРР):")
+        await query.edit_message_text("✏️ Введіть дату (ДД.ММ.РРРР):", reply_markup=prompt_markup())
         context.user_data['awaiting'] = 'plan_date'
         return PLAN_DATE
     else:
@@ -1600,7 +1746,7 @@ async def plan_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data['plan_date'] = chosen_date
     context.user_data['previous_state'] = PLAN_DATE
-    await query.edit_message_text(f"📝 Введіть текст нагадування:")
+    await query.edit_message_text(f"📝 Введіть текст нагадування:", reply_markup=prompt_markup())
     context.user_data['awaiting'] = 'plan_text'
     return PLAN_TEXT
 
@@ -1632,8 +1778,10 @@ async def plan_time_final_callback(update: Update, context: ContextTypes.DEFAULT
             'time': None,
             'done': False
         }
-        fb_add('plans', plan)
-        await query.edit_message_text("✅ Нагадування додано")
+        plan_id = fb_add('plans', plan)
+        ms = undo_push(update.effective_user.id, f"Нагадування: {plan.get('text') or ''}",
+                       [{'op': 'delete', 'col': 'plans', 'id': plan_id}] if plan_id else [])
+        await query.edit_message_text("✅ Нагадування додано", reply_markup=undo_markup(ms))
         await query.message.reply_text("Головне меню:", reply_markup=main_keyboard())
         return MAIN_MENU
 
@@ -1651,6 +1799,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ❓ *Допомога* — ця інформація
 
 ⬅️ *Назад* — повернутись на попередній крок (далі — головне меню)
+❌ *Скасувати* — перервати введення і повернутись у головне меню
+↩️ /undo — відмінити останню дію (або кнопка «Відмінити» під повідомленням)
 """
     await update.effective_message.reply_text(text, parse_mode='Markdown')
 
@@ -1661,9 +1811,12 @@ def main():
     _patch_markdown_safety_net()
 
     # Conversation handler
+    app.add_handler(CommandHandler('undo', undo_command))
+    app.add_handler(CallbackQueryHandler(undo_callback, pattern=r'^undo_\d+$'))
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
+            CommandHandler("cancel", flow_cancel_text),
             MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_handler)
         ],
         states=_with_back({
