@@ -407,6 +407,8 @@ def _nav_renderers():
         'report': show_report,
         'history': render_history,
         'objects_list': show_objects,
+        'obj_card': lambda u, c: show_object_card(u, c, c.user_data.get('cur_obj_id')),
+        'report_detail': lambda u, c: show_object_report(u, c, c.user_data.get('cur_obj_id')),
         'plan': start_plan,
     }
 
@@ -441,7 +443,8 @@ def _with_back(states):
     # Кнопки головного меню (reply-клавіатура) працюють з будь-якого кроку
     menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Фото чека/накладної|📦 Склад|📊 Звіт по об\'єкту|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
     menu_h = MessageHandler(menu_re, main_menu_handler)
-    return {k: [back_cb, cancel_cb, back_txt, cancel_txt, cancel_cmd, menu_h, *v] for k, v in states.items()}
+    fallback = MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback_handler)
+    return {k: [back_cb, cancel_cb, back_txt, cancel_txt, cancel_cmd, menu_h, *v, fallback] for k, v in states.items()}
 
 # ── ЩОДЕННИЙ ЗВІТ ────────────────────────────────────────────
 async def start_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1520,42 +1523,150 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
 async def show_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'stock')
     context.user_data['previous_state'] = MAIN_MENU
-    buttons = [[InlineKeyboardButton("🔍 Пошук на складі", callback_data="stock_search")],
+    buttons = [[InlineKeyboardButton("🔍 Знайти матеріал", callback_data="stock_search")],
+               [InlineKeyboardButton("📋 Показати весь склад", callback_data="stock_all")],
                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")]]
     await show_or_edit(update,
-        "📦 *Склад матеріалів*\n\nЩо робити?",
-        parse_mode='Markdown',
+        "📦 Склад матеріалів\n\nЩо зробити?",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
     return STOCK_ACTION
+
+def search_back_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Знайти інший матеріал", callback_data="stock_search")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+    ])
+
+def _stock_lines(items):
+    rows = [(str(i), st.get('name', '—'), f"{st.get('qty', 0)} {st.get('unit', 'шт')}")
+            for i, st in enumerate(items, 1)]
+    return make_table(["№", "Матеріал", "Залишок"], rows, [3, 20, 12])
 
 async def show_stock_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'stock_list')
     stocks = fb_get_all('matStock')
     if not stocks:
-        await show_or_edit(update, "📦 Склад порожній", reply_markup=back_markup())
+        await show_or_edit(update, "📦 Склад поки порожній", reply_markup=search_back_markup())
         return STOCK_ACTION
-
-    text = "📦 *Склад:*\n\n"
-    for s in stocks:
-        name = s.get('name', '—')
-        qty = s.get('qty', 0)
-        unit = s.get('unit', 'шт')
-        price = s.get('price', 0)
-        text += f"• {name} — {qty} {unit}"
-        if price:
-            text += f" × {fmt_money(price)}"
-        text += "\n"
-
-    await show_or_edit(update, text, reply_markup=back_markup(), parse_mode='Markdown')
+    note = ""
+    if len(stocks) > 50:
+        note = "\nПоказано перші 50. Для пошуку натисніть «Знайти матеріал»."
+    text = "<b>📦 Склад</b>\n" + _stock_lines(stocks[:50]) + note
+    await show_or_edit(update, text, reply_markup=search_back_markup(), parse_mode='HTML')
     return STOCK_ACTION
 
 async def stock_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == 'stock_search':
+        context.user_data['awaiting'] = 'stock_search'
+        await show_or_edit(update,
+            "🔍 Напишіть назву матеріалу або її частину.\nНаприклад: кабель",
+            reply_markup=prompt_markup())
+        return STOCK_ACTION
+    if query.data == 'stock_all':
         return await show_stock_list(update, context)
     return STOCK_ACTION
+
+async def stock_search_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = (update.effective_message.text or '').strip().lower()
+    context.user_data.pop('awaiting', None)
+    words = [w for w in q.split() if w]
+    stocks = fb_get_all('matStock')
+    found = [st for st in stocks if words and all(w in (st.get('name') or '').lower() for w in words)]
+    if not found:
+        await update.effective_message.reply_text(
+            f"Нічого не знайдено за словом «{q}».\nСпробуйте коротше, наприклад: кабель або ВВГ",
+            reply_markup=search_back_markup())
+    else:
+        text = f"<b>🔍 Знайдено: {len(found)}</b>\n" + _stock_lines(found[:30])
+        await update.effective_message.reply_text(text, reply_markup=search_back_markup(), parse_mode='HTML')
+    return STOCK_ACTION
+
+async def text_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Текст, якого бот не чекав: не мовчимо, а пояснюємо що робити
+    if context.user_data.get('awaiting') == 'stock_search':
+        return await stock_search_text(update, context)
+    await update.effective_message.reply_text(
+        "🤔 Я не зрозумів. Натисніть кнопку внизу, щоб обрати дію.\nЩоб почати спочатку, натисніть /start.",
+        reply_markup=main_keyboard())
+    return MAIN_MENU
+
+import html as _html
+
+def _h(v):
+    return _html.escape(str(v))
+
+def _cell(v, w):
+    v = str(v)
+    if len(v) > w:
+        v = v[:w - 1] + "…"
+    return v.ljust(w)
+
+def make_table(headers, rows, widths):
+    """Таблиця з заголовками у моноширинному блоці (Telegram <pre>)."""
+    sep = " | "
+    lines = [sep.join(_cell(h, w) for h, w in zip(headers, widths))]
+    lines.append("-" * (sum(widths) + len(sep) * (len(widths) - 1)))
+    for r in rows:
+        lines.append(sep.join(_cell(c, w) for c, w in zip(r, widths)))
+    return "<pre>" + _h("\n".join(lines)) + "</pre>"
+
+# ── ДЕТАЛІ ЗАПИСУ ДЛЯ ЗВІТУ ─────────────────────────────────────
+def log_total(log):
+    wage = sum((w.get('hrs') or 0) * (w.get('rate') or 0) for w in (log.get('workers') or []))
+    mat = sum((m.get('qty') or 0) * (m.get('price') or 0) for m in (log.get('materials') or []))
+    tr = sum((t.get('cost') or 0) for t in (log.get('transport') or []))
+    return wage + mat + tr
+
+def format_log_details(log):
+    t = f"📅 {fmt_date(log.get('date'))} | {log.get('objName') or '—'}\n"
+    t += f"✍️ Подав: {log.get('submittedBy') or 'не вказано'}\n"
+    workers = log.get('workers') or []
+    materials = log.get('materials') or []
+    transport = log.get('transport') or []
+    if workers:
+        t += "👷 Робітники:\n"
+        for w in workers:
+            t += f"  • {w.get('name', '')} — {w.get('hrs', 0)}год"
+            if w.get('rate'):
+                t += f" = {fmt_money((w.get('hrs') or 0) * w['rate'])}"
+            t += "\n"
+    if materials:
+        t += "📦 Матеріали:\n"
+        for m in materials:
+            t += f"  • {m.get('name', '')} {m.get('qty', '')} {m.get('unit', '')}"
+            if m.get('price'):
+                t += f" = {fmt_money((m.get('qty') or 0) * m['price'])}"
+            t += "\n"
+    if transport:
+        t += "🚛 Транспорт:\n"
+        for x in transport:
+            if x.get('qty'):
+                t += f"  • {x.get('name', '')} — {x['qty']} x {fmt_money(x.get('price', 0))} = {fmt_money(x.get('cost', 0))}\n"
+            else:
+                t += f"  • {x.get('name', '')} — {fmt_money(x.get('cost', 0))}\n"
+    if log.get('desc'):
+        t += f"📝 {log['desc']}\n"
+    t += f"💰 Разом за запис: {fmt_money(log_total(log))}\n"
+    return t
+
+def render_object_report(obj_logs):
+    obj_logs = sorted(obj_logs, key=lambda l: str(l.get('date') or ''), reverse=True)
+    name = obj_logs[0].get('objName') or "Об'єкт"
+    grand = sum(log_total(l) for l in obj_logs)
+    rows = [(fmt_date(l.get('date')), l.get('submittedBy') or '—', fmt_money(log_total(l)))
+            for l in obj_logs[:15]]
+    parts = [f"<b>📊 Звіт по об'єкту: {_h(name)}</b>",
+             f"Записів: {len(obj_logs)} | Разом: <b>{_h(fmt_money(grand))}</b>",
+             "", make_table(["Дата", "Подав", "Сума"], rows, [10, 12, 12])]
+    if len(obj_logs) > 15:
+        parts.append(f"… показано 15 з {len(obj_logs)}")
+    details = "\n──────────\n".join(format_log_details(l) for l in obj_logs[:5])
+    parts.append("\n<b>Деталі останніх записів:</b>")
+    parts.append(_h(details[:2800]))
+    return "\n".join(parts)
 
 # ── ЗВІТ ПО ОБ'ЄКТУ ───────────────────────────────────────────
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1585,9 +1696,7 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("❌ Записів немає", reply_markup=back_markup())
             return HISTORY_LIST
 
-        text = f"📊 Звіт по об'єкту\n\n"
-        for log in obj_logs[:10]:
-            text += f"📅 {fmt_date(log.get('date'))} — {log.get('submittedBy')}\n"
+        text = render_object_report(obj_logs)
 
         nav_push(context, 'report_detail')
         await query.edit_message_text(text, reply_markup=back_markup())
@@ -1625,12 +1734,70 @@ async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return OBJECTS_ACTION
 
+async def show_object_card(update, context, obj_id):
+    obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+    if not obj:
+        await show_or_edit(update, "❌ Такого об'єкта немає. Оберіть інший.", reply_markup=back_markup())
+        return OBJECTS_ACTION
+    context.user_data['cur_obj_id'] = obj_id
+    nav_push(context, 'obj_card')
+    status = 'активний' if obj.get('status') == 'active' else (obj.get('status') or '—')
+    text = f"🏗️ {obj.get('name', '—')}\nСтатус: {status}\n\nЩо зробити?"
+    buttons = [
+        [InlineKeyboardButton("📝 Внести звіт за сьогодні", callback_data=f"obj_daily_{obj_id}")],
+        [InlineKeyboardButton("📊 Подивитись звіти", callback_data=f"obj_report_{obj_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+    ]
+    await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup(buttons))
+    return OBJECTS_ACTION
+
+async def show_object_report(update, context, obj_id):
+    logs = fb_get_all('dailyLogs')
+    obj_logs = [l for l in logs if l.get('objId') == obj_id]
+    nav_push(context, 'report_detail')
+    if not obj_logs:
+        await show_or_edit(update, "ℹ️ По цьому об'єкту ще немає звітів.", reply_markup=obj_back_markup(obj_id))
+    else:
+        await show_or_edit(update, render_object_report(obj_logs), reply_markup=obj_back_markup(obj_id), parse_mode='HTML')
+    return OBJECTS_ACTION
+
+def obj_back_markup(obj_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Внести звіт за сьогодні", callback_data=f"obj_daily_{obj_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+    ])
+
 async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data
 
-    if query.data == 'back_to_menu':
+    if data == 'back_to_menu':
         return await back_to_menu(update, context)
+
+    if data.startswith('obj_detail_'):
+        return await show_object_card(update, context, data.replace('obj_detail_', ''))
+
+    if data.startswith('obj_daily_'):
+        obj_id = data.replace('obj_daily_', '')
+        obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+        if not obj:
+            await show_or_edit(update, "❌ Такого об'єкта немає.", reply_markup=back_markup())
+            return OBJECTS_ACTION
+        context.user_data['daily'] = {
+            'date': today_str(), 'workers': [], 'materials': [], 'transport': [], 'desc': '',
+            'objId': obj_id, 'objName': obj.get('name', ''),
+        }
+        context.user_data['objects'] = get_objects()
+        context.user_data['previous_state'] = SELECT_OBJECT
+        nav_reset(context)
+        return await ask_workers(update, context)
+
+    if data.startswith('obj_report_'):
+        obj_id = data.replace('obj_report_', '')
+        context.user_data['cur_obj_id'] = obj_id
+        nav_push(context, 'obj_card')
+        return await show_object_report(update, context, obj_id)
 
     return OBJECTS_ACTION
 
