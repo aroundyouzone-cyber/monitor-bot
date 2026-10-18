@@ -194,7 +194,7 @@ def get_workers():
 def main_keyboard():
     return ReplyKeyboardMarkup([
         ['📅 Щоденний звіт', '🧾 Чек / накладна / рахунок'],
-        ['📦 Склад', '📊 Звіт по об\'єкту'],
+        ['📦 Склад', '📊 Переглянути звіт'],
         ['🏗️ Об\'єкти', '📜 Мої записи'],
         ['📆 Планування'],
         ['❓ Допомога'],
@@ -246,7 +246,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await start_receipt(update, context)
     elif text == '📦 Склад':
         return await show_stock(update, context)
-    elif text == '📊 Звіт по об\'єкту':
+    elif text == '📊 Переглянути звіт':
         return await show_report(update, context)
     elif text == '🏗️ Об\'єкти':
         return await show_objects(update, context)
@@ -424,7 +424,7 @@ async def render_objects_screen(update, context):
 async def render_desc_screen(update, context):
     nav_push(context, 'desc')
     context.user_data['awaiting'] = 'daily_desc'
-    await show_or_edit(update, "📝 Опишіть що зробили за день:")
+    await show_or_edit(update, "📝 Опишіть що зробили за день:", reply_markup=prompt_markup())
     return DAILY_DESC
 
 def _nav_renderers():
@@ -477,7 +477,7 @@ def _with_back(states):
     cancel_txt = MessageHandler(filters.Regex('^❌ Скасувати$'), flow_cancel_text)
     cancel_cmd = CommandHandler('cancel', flow_cancel_text)
     # Кнопки головного меню (reply-клавіатура) працюють з будь-якого кроку
-    menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Чек / накладна / рахунок|📦 Склад|📊 Звіт по об\'єкту|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
+    menu_re = filters.Regex('^(📅 Щоденний звіт|🧾 Чек / накладна / рахунок|📦 Склад|📊 Переглянути звіт|🏗️ Об\'єкти|📜 Мої записи|📆 Планування|❓ Допомога)$')
     menu_h = MessageHandler(menu_re, main_menu_handler)
     fallback = MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback_handler)
     return {k: [back_cb, cancel_cb, back_txt, cancel_txt, cancel_cmd, menu_h, *v, fallback] for k, v in states.items()}
@@ -516,7 +516,8 @@ async def date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         yst = (date.today() - timedelta(days=1)).isoformat()
         return await show_object_buttons(update, context, yst, via_callback=True)
     if data == 'date_custom':
-        await query.edit_message_text("✏️ Введіть дату у форматі ДД.ММ.РРРР (наприклад: 28.08.2026):")
+        await query.edit_message_text("✏️ Введіть дату у форматі ДД.ММ.РРРР (наприклад: 28.08.2026):",
+            reply_markup=prompt_markup())
         context.user_data['awaiting'] = 'custom_date'
         return SELECT_DATE
     return SELECT_DATE
@@ -633,7 +634,9 @@ async def worker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'wrk_manual':
         await query.edit_message_text(
             "✏️ Введіть ПІБ робітника та години у форматі:\n"
-            "`Петренко І.І. 8`\n\nАбо: `Петренко 8 280` (ПІБ години ставка)"
+            "`Петренко І.І. 8`\n\nАбо: `Петренко 8 280` (ПІБ години ставка)",
+            parse_mode='Markdown',
+            reply_markup=prompt_markup()
         )
         context.user_data['awaiting'] = 'worker_manual'
         return DAILY_WORKERS
@@ -1424,7 +1427,8 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if 'error' in parsed:
                     await update.effective_message.reply_text(
-                        f"⚠️ Не вдалось розпізнати: {parsed['error']}\n\nВведіть вручну:"
+                        f"⚠️ Не вдалось розпізнати: {parsed['error']}\n\nВведіть вручну:",
+                        reply_markup=prompt_markup()
                     )
                     return RECEIPT_PHOTO
 
@@ -1436,14 +1440,16 @@ async def receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.effective_message.reply_text(
                     "⚠️ Помилка розпізнавання. Введіть вручну:\n"
                     "назву матеріалу — далі бот запитає решту по кроках",
-                    parse_mode='Markdown'
+                    parse_mode='Markdown',
+                    reply_markup=prompt_markup()
                 )
                 return RECEIPT_PHOTO
         else:
             await update.effective_message.reply_text(
                 "⚠️ Розпізнавання недоступне (немає API ключа Claude).\n"
                 "Напишіть назву матеріалу — далі бот запитає решту по кроках",
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=prompt_markup()
             )
             return RECEIPT_PHOTO
 
@@ -1906,6 +1912,8 @@ async def text_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return await hist_edit_text(update, context)
     if context.user_data.get('awaiting') == 'new_object_name':
         return await new_object_text(update, context)
+    if str(context.user_data.get('awaiting', '')).startswith('obj_rename:'):
+        return await obj_rename_text(update, context)
     if context.user_data.get('awaiting') == 'stock_search':
         return await stock_search_text(update, context)
     await update.effective_message.reply_text(
@@ -2298,22 +2306,56 @@ async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return OBJECTS_ACTION
 
-async def show_object_card(update, context, obj_id):
+async def show_object_card(update, context, obj_id, undo_ms=None):
+    # Картка об'єкта: стан і зміни. Внесення й перегляд звітів — у головному меню.
     obj = next((o for o in get_objects() if o['id'] == obj_id), None)
     if not obj:
         await show_or_edit(update, "❌ Такого об'єкта немає. Оберіть інший.", reply_markup=back_markup())
         return OBJECTS_ACTION
     context.user_data['cur_obj_id'] = obj_id
     nav_push(context, 'obj_card')
-    status = 'активний' if obj.get('status') == 'active' else (obj.get('status') or '—')
-    text = f"🏗️ {obj.get('name', '—')}\nСтатус: {status}\n\nЩо зробити?"
-    buttons = [
-        [InlineKeyboardButton("📝 Внести звіт за сьогодні", callback_data=f"obj_daily_{obj_id}")],
-        [InlineKeyboardButton("📊 Подивитись звіти", callback_data=f"obj_report_{obj_id}")],
+    active = obj.get('status') == 'active'
+    status = 'активний' if active else 'призупинено'
+    logs = [l for l in fb_get_all('dailyLogs') if l.get('objId') == obj_id]
+    wk = filter_logs_period(logs, 'w')
+    text = f"🏗️ {obj.get('name', '—')}\nСтатус: {status}\n\n"
+    text += f"Записів за тиждень: {len(wk)} · {fmt_money(sum(log_total(l) for l in wk))}\n"
+    if logs:
+        last = max(logs, key=lambda l: str(l.get('date') or ''))
+        text += f"Останній запис: {fmt_date(last.get('date'))} · {fmt_money(log_total(last))}"
+    else:
+        text += "Записів ще немає"
+    buttons = []
+    if undo_ms:
+        buttons.append(undo_markup(undo_ms).inline_keyboard[0])
+    buttons += [
+        [InlineKeyboardButton("▶️ Активувати" if not active else "⏸ Призупинити",
+                              callback_data=f"obj_toggle_{obj_id}")],
+        [InlineKeyboardButton("✏️ Змінити назву", callback_data=f"obj_rename_{obj_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
     await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup(buttons))
     return OBJECTS_ACTION
+
+async def obj_rename_text(update, context):
+    name = (update.effective_message.text or '').strip()
+    awaiting = str(context.user_data.get('awaiting', ''))
+    obj_id = awaiting.split(':', 1)[1] if ':' in awaiting else ''
+    if len(name) < 2:
+        await update.effective_message.reply_text(
+            "❌ Назва занадто коротка. Напишіть нову назву, наприклад: СЕС Губа 1",
+            reply_markup=prompt_markup())
+        return OBJECTS_ACTION
+    obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+    context.user_data.pop('awaiting', None)
+    if not obj:
+        await update.effective_message.reply_text("❌ Такого об'єкта немає.", reply_markup=back_markup())
+        return OBJECTS_ACTION
+    old = {k: v for k, v in obj.items() if k != 'id'}
+    fb_set('objects', obj_id, {**old, 'name': name})
+    ms = undo_push(update.effective_user.id, f"Перейменовано об'єкт «{old.get('name', '')}» → «{name}»",
+                   [{'op': 'restore', 'col': 'objects', 'id': obj_id, 'data': old}])
+    return await show_object_card(update, context, obj_id, undo_ms=ms)
 
 async def show_object_report(update, context, obj_id):
     logs = fb_get_all('dailyLogs')
@@ -2341,6 +2383,32 @@ async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if data.startswith('obj_detail_'):
         return await show_object_card(update, context, data.replace('obj_detail_', ''))
+
+    if data.startswith('obj_toggle_'):
+        obj_id = data.replace('obj_toggle_', '')
+        obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+        if not obj:
+            await show_or_edit(update, "❌ Такого об'єкта немає.", reply_markup=back_markup())
+            return OBJECTS_ACTION
+        old = {k: v for k, v in obj.items() if k != 'id'}
+        now_active = obj.get('status') != 'active'
+        fb_set('objects', obj_id, {**old, 'status': 'active' if now_active else 'paused'})
+        ms = undo_push(update.effective_user.id,
+                       f"Об'єкт «{old.get('name', '')}»: {'активовано' if now_active else 'призупинено'}",
+                       [{'op': 'restore', 'col': 'objects', 'id': obj_id, 'data': old}])
+        return await show_object_card(update, context, obj_id, undo_ms=ms)
+
+    if data.startswith('obj_rename_'):
+        obj_id = data.replace('obj_rename_', '')
+        obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+        if not obj:
+            await show_or_edit(update, "❌ Такого об'єкта немає.", reply_markup=back_markup())
+            return OBJECTS_ACTION
+        context.user_data['awaiting'] = f'obj_rename:{obj_id}'
+        await show_or_edit(update,
+            f"✏️ Напишіть нову назву для «{obj.get('name', '')}»:",
+            reply_markup=prompt_markup())
+        return OBJECTS_ACTION
 
     if data.startswith('obj_daily_'):
         obj_id = data.replace('obj_daily_', '')
@@ -2540,34 +2608,55 @@ def kyiv_now():
     return datetime.now(kyiv_tz())
 
 def reminder_due(now, last_sent_day, hour):
-    return now.hour >= hour and last_sent_day != now.date().isoformat()
+    # Нагадування надсилається в межах 2 годин після свого часу, щоб уночі після перезапуску не шуміти
+    return hour <= now.hour < hour + 2 and last_sent_day != now.date().isoformat()
 
 def missing_reports(objects, logs, day_iso):
     have = {l.get('objId') for l in logs if str(l.get('date') or '') == day_iso}
     return [o for o in objects if o.get('status') == 'active' and o.get('id') not in have]
 
-def get_reminder_last():
+def get_reminder_doc():
     doc = next((x for x in fb_get_all('settings') if x.get('id') == 'reminder'), None)
-    return (doc or {}).get('last', '')
+    return dict(doc or {})
+
+async def _broadcast(bot, text):
+    for uid in ALLOWED_IDS:
+        try:
+            await bot.send_message(chat_id=int(uid), text=text)
+        except Exception as e:
+            logger.error(f"reminder send error: {e}")
 
 async def reminder_loop(bot):
-    hour = int(os.environ.get('REMIND_HOUR', '18') or 18)
+    # 17:00 — нагадати внести звіт (завжди, з переліком тих, хто ще не вніс)
+    # 18:00 — якщо звіт по якомусь об'єкту ще не внесено, нагадати ще раз
+    early_h = int(os.environ.get('REMIND_EARLY_HOUR', '17') or 17)
+    late_h = int(os.environ.get('REMIND_HOUR', '18') or 18)
     while True:
         try:
             now = kyiv_now()
-            if reminder_due(now, get_reminder_last(), hour):
-                day = now.date().isoformat()
+            day = now.date().isoformat()
+            doc = get_reminder_doc()
+            if reminder_due(now, doc.get('early', ''), early_h):
                 miss = missing_reports(get_objects(), fb_get_all('dailyLogs'), day)
                 if miss:
                     names = ", ".join(o.get('name', '') for o in miss)
-                    text = (f"🔔 За сьогодні ({fmt_date(day)}) ще немає звіту по: {names}.\n"
+                    text = (f"⏰ {early_h}:00 — час внести щоденний звіт за {fmt_date(day)}.\n"
+                            f"Ще не внесено: {names}\n"
                             "Натисніть «📅 Щоденний звіт».")
-                    for uid in ALLOWED_IDS:
-                        try:
-                            await bot.send_message(chat_id=int(uid), text=text)
-                        except Exception as e:
-                            logger.error(f"reminder send error: {e}")
-                fb_set('settings', 'reminder', {'last': day})
+                else:
+                    text = f"⏰ {early_h}:00 — звіти за {fmt_date(day)} внесено по всіх об'єктах ✅"
+                await _broadcast(bot, text)
+                doc['early'] = day
+                fb_set('settings', 'reminder', doc)
+            if reminder_due(now, doc.get('last', ''), late_h):
+                miss = missing_reports(get_objects(), fb_get_all('dailyLogs'), day)
+                if miss:
+                    names = ", ".join(o.get('name', '') for o in miss)
+                    text = (f"🔔 {late_h}:00 — за сьогодні ({fmt_date(day)}) ще немає звіту по: {names}.\n"
+                            "Натисніть «📅 Щоденний звіт».")
+                    await _broadcast(bot, text)
+                doc['last'] = day
+                fb_set('settings', 'reminder', doc)
         except Exception as e:
             logger.error(f"reminder loop error: {e}")
         await asyncio.sleep(600)
