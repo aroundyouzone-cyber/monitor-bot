@@ -1830,7 +1830,7 @@ def search_back_markup():
 
 def _stock_lines(items):
     # Таблиця складу; довга назва переноситься на кілька рядків, а не обрізається
-    rows = [(str(i), st.get('name') or '—', f"{_num(st.get('qty', 0))} {st.get('unit') or 'шт'}")
+    rows = [(str(i), st.get('name') or '—', f"{_fmt_num(st.get('qty', 0))} {st.get('unit') or 'шт'}")
             for i, st in enumerate(items, 1)]
     return make_table(["№", "Назва", "Кільк."], rows, [3, 22, 8])
 
@@ -1932,7 +1932,7 @@ def _cell(v, w):
         v = v[:w - 1] + "…"
     return v.ljust(w)
 
-def _num(x):
+def _fmt_num(x):
     """Число без валюти: 2640 → '2 640', 25.5 → '25.5'."""
     try:
         x = float(x)
@@ -2014,9 +2014,9 @@ def format_log_details(log):
         for w in workers:
             hrs, rate = w.get('hrs') or 0, w.get('rate')
             rows.append((w.get('name', ''),
-                         _num(hrs),
-                         _num(rate) if rate else '—',
-                         _num(hrs * rate) if rate else '—'))
+                         _fmt_num(hrs),
+                         _fmt_num(rate) if rate else '—',
+                         _fmt_num(hrs * rate) if rate else '—'))
         out += ["", "<b>👷 Робітники</b>",
                 make_table(["Працівник", "Годин", "Ставка", "Сума"], rows, [11, 6, 6, 6])]
     if materials:
@@ -2024,9 +2024,9 @@ def format_log_details(log):
         for m in materials:
             qty, price = m.get('qty'), m.get('price')
             rows.append((m.get('name', ''),
-                         f"{_num(qty)} {m.get('unit') or ''}".strip() if qty not in (None, '') else '—',
-                         _num(price) if price else '—',
-                         _num((qty or 0) * price) if price else '—'))
+                         f"{_fmt_num(qty)} {m.get('unit') or ''}".strip() if qty not in (None, '') else '—',
+                         _fmt_num(price) if price else '—',
+                         _fmt_num((qty or 0) * price) if price else '—'))
         out += ["", "<b>📦 Матеріали</b>",
                 make_table(["Матеріал", "К-сть", "Ціна/од", "Сума"], rows, [11, 6, 7, 6])]
     if transport:
@@ -2034,9 +2034,9 @@ def format_log_details(log):
         for x in transport:
             qty, price = x.get('qty'), x.get('price')
             rows.append((x.get('name', ''),
-                         _num(qty) if qty else '—',
-                         _num(price) if price else '—',
-                         _num(x.get('cost') or 0)))
+                         _fmt_num(qty) if qty else '—',
+                         _fmt_num(price) if price else '—',
+                         _fmt_num(x.get('cost') or 0)))
         out += ["", "<b>🚛 Транспорт</b>",
                 make_table(["Транспорт", "К-сть", "Ціна/од", "Сума"], rows, [11, 6, 7, 6])]
     if log.get('desc'):
