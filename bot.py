@@ -1011,7 +1011,10 @@ async def ask_transport_msg(update, context, via_callback=False):
     if added:
         text += "\nДодано:\n"
         for t in added:
-            text += f"  • {t['name']} — {fmt_money(t['cost'])}\n"
+            if t.get('qty'):
+                text += f"  • {t['name']} — {t['qty']:g} × {fmt_money(t.get('price', 0))} = {fmt_money(t['cost'])}\n"
+            else:
+                text += f"  • {t['name']} — {fmt_money(t['cost'])}\n"
 
     buttons = [
         [InlineKeyboardButton("➕ Додати транспорт", callback_data="tr_add")],
@@ -1183,7 +1186,10 @@ async def start_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Або одним рядком з рисками:\n"
         "`Кабель ВВГ | 5×16 | 50 м | 56`",
         parse_mode='Markdown',
-        reply_markup=ReplyKeyboardMarkup([['🔙 Назад']], resize_keyboard=True)
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu"),
+            InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel"),
+        ]])
     )
     return RECEIPT_PHOTO
 
@@ -1817,9 +1823,11 @@ def search_back_markup():
     ])
 
 def _stock_lines(items):
-    rows = [(str(i), st.get('name', '—'), f"{st.get('qty', 0)} {st.get('unit', 'шт')}")
-            for i, st in enumerate(items, 1)]
-    return make_table(["№", "Матеріал", "Залишок"], rows, [3, 16, 10])
+    # Повні назви рядками (в таблиці вони обрізались і не було видно, що це за матеріал)
+    lines = []
+    for i, st in enumerate(items, 1):
+        lines.append(f"{i}. {_h(st.get('name', '—'))} — <b>{_h(st.get('qty', 0))} {_h(st.get('unit', 'шт'))}</b>")
+    return "\n".join(lines)
 
 async def show_stock_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'stock_list')
