@@ -162,6 +162,18 @@ def fmt_money(n):
 def get_objects():
     return fb_get_all('objects')
 
+def get_visible_objects():
+    """Об'єкти для списків: без архівних (архівні видно тільки в «🗃 Архів»)."""
+    return [o for o in get_objects() if o.get('status') != 'archived']
+
+def obj_state_text(obj):
+    s = obj.get('status')
+    return {'active': 'активний', 'paused': 'призупинено', 'archived': 'в архіві'}.get(s, 'призупинено')
+
+def obj_state_icon(obj):
+    s = obj.get('status')
+    return '🟢' if s == 'active' else ('⏸' if s == 'paused' else '🗃')
+
 def catalog_items(kind, limit=12):
     """Довідник (колекція catalog): найчастіші назви спершу"""
     items = [c for c in fb_get_all('catalog') if c.get('kind') == kind and c.get('name')]
@@ -235,8 +247,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 # ── ГОЛОВНЕ МЕНЮ ──────────────────────────────────────────────
+MENU_LABELS = {'📅 Щоденний звіт', '🧾 Чек / накладна / рахунок', '📦 Склад', '📊 Переглянути звіт',
+               "🏗️ Об'єкти", '📜 Мої записи', '📆 Планування', '❓ Допомога'}
+AWAIT_TEXT_PREFIXES = ('why_text:', 'obj_rename:', 'hedit_', 'stock_search', 'new_object_name')
+
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    # Якщо бот чекає текст (причина, нова назва, пошук тощо), а натиснута не кнопка меню — віддаємо текст туди
+    awaiting = str(context.user_data.get('awaiting', ''))
+    if awaiting.startswith(AWAIT_TEXT_PREFIXES) and text not in MENU_LABELS:
+        return await text_fallback_handler(update, context)
+    context.user_data.pop('awaiting', None)  # натиснуто кнопку меню — очікування тексту скасовуємо
     nav_reset(context)
     context.user_data.pop('daily', None)
 
@@ -443,6 +464,7 @@ def _nav_renderers():
         'report': show_report,
         'history': render_history,
         'objects_list': show_objects,
+        'objects_archive': show_archive_list,
         'obj_card': lambda u, c: show_object_card(u, c, c.user_data.get('cur_obj_id')),
         'report_detail': lambda u, c: show_object_report(u, c, c.user_data.get('cur_obj_id')),
         'plan': start_plan,
@@ -1758,7 +1780,7 @@ async def receipt_target_callback(update: Update, context: ContextTypes.DEFAULT_
         return MAIN_MENU
 
     if data == 'rec_object':
-        objects = get_objects()
+        objects = get_visible_objects()
         buttons = [[InlineKeyboardButton(o['name'], callback_data=f"recobj_{o['id']}")] for o in objects[:10]]
         buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
         await query.edit_message_text("🏗️ Оберіть об'єкт:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -1888,6 +1910,11 @@ async def new_object_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Якщо такий об'єкт уже є — не дублюємо, а обираємо його
     existing = next((o for o in get_objects()
                      if (o.get('name') or '').strip().lower() == name.lower()), None)
+    if existing and existing.get('status') == 'archived':
+        await update.effective_message.reply_text(
+            f"🗃 Об'єкт «{existing['name']}» є в архіві.\nВідновіть його в «🏗️ Об'єкти» → «🗃 Архів», щоб вносити звіти.",
+            reply_markup=main_keyboard())
+        return MAIN_MENU
     if existing and existing.get('status') == 'active':
         obj_id, obj_name = existing['id'], existing['name']
         await update.effective_message.reply_text(f"ℹ️ Об'єкт «{obj_name}» вже є — обрано його.")
@@ -2102,7 +2129,7 @@ def render_object_report(obj_logs, label=''):
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'report')
     context.user_data['previous_state'] = MAIN_MENU
-    objects = get_objects()
+    objects = get_visible_objects()
     buttons = [[InlineKeyboardButton(o['name'], callback_data=f"rep_{o['id']}")] for o in objects[:10]]
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
     await show_or_edit(update,
@@ -2299,14 +2326,31 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
 async def show_objects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'objects_list')
     context.user_data['previous_state'] = MAIN_MENU
-    objects = get_objects()
-    buttons = [[InlineKeyboardButton(f"🏗️ {o['name']}", callback_data=f"obj_detail_{o['id']}")] for o in objects]
+    objects = get_visible_objects()
+    buttons = [[InlineKeyboardButton(f"{obj_state_icon(o)} {o['name']}", callback_data=f"obj_detail_{o['id']}")]
+               for o in objects]
+    archived = [o for o in get_objects() if o.get('status') == 'archived']
+    if archived:
+        buttons.append([InlineKeyboardButton(f"🗃 Архів ({len(archived)})", callback_data="obj_archive_list")])
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
     await show_or_edit(update,
-        "🏗️ *Об'єкти*",
+        "🏗️ *Об'єкти*\n\n🟢 активний · ⏸ призупинено",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
     )
+    return OBJECTS_ACTION
+
+async def show_archive_list(update, context):
+    nav_push(context, 'objects_archive')
+    archived = [o for o in get_objects() if o.get('status') == 'archived']
+    if archived:
+        buttons = [[InlineKeyboardButton(f"🗃 {o['name']}", callback_data=f"obj_detail_{o['id']}")] for o in archived]
+        text = "🗃 *Архів об'єктів*\n\nНатисніть на об'єкт, щоб відновити його."
+    else:
+        buttons = []
+        text = "🗃 *Архів порожній*"
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
+    await show_or_edit(update, text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
     return OBJECTS_ACTION
 
 async def show_object_card(update, context, obj_id, undo_ms=None):
@@ -2317,26 +2361,30 @@ async def show_object_card(update, context, obj_id, undo_ms=None):
         return OBJECTS_ACTION
     context.user_data['cur_obj_id'] = obj_id
     nav_push(context, 'obj_card')
+    archived = obj.get('status') == 'archived'
     active = obj.get('status') == 'active'
-    status = 'активний' if active else 'призупинено'
     logs = [l for l in fb_get_all('dailyLogs') if l.get('objId') == obj_id]
     wk = filter_logs_period(logs, 'w')
-    text = f"🏗️ {obj.get('name', '—')}\nСтатус: {status}\n\n"
+    text = f"🏗️ {obj.get('name', '—')}\nСтатус: {obj_state_text(obj)}\n\n"
     text += f"Записів за тиждень: {len(wk)} · {fmt_money(sum(log_total(l) for l in wk))}\n"
     if logs:
         last = max(logs, key=lambda l: str(l.get('date') or ''))
         text += f"Останній запис: {fmt_date(last.get('date'))} · {fmt_money(log_total(last))}"
     else:
         text += "Записів ще немає"
+    if archived:
+        text += "\n\nОб'єкт у архіві: він не показується в списках і нагадуваннях. Дані збережено."
     buttons = []
     if undo_ms:
         buttons.append(undo_markup(undo_ms).inline_keyboard[0])
-    buttons += [
-        [InlineKeyboardButton("▶️ Активувати" if not active else "⏸ Призупинити",
-                              callback_data=f"obj_toggle_{obj_id}")],
-        [InlineKeyboardButton("✏️ Змінити назву", callback_data=f"obj_rename_{obj_id}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
-    ]
+    buttons.append([InlineKeyboardButton("✏️ Змінити назву", callback_data=f"obj_rename_{obj_id}")])
+    if archived:
+        buttons.append([InlineKeyboardButton("♻️ Відновити з архіву", callback_data=f"obj_restore_{obj_id}")])
+    else:
+        buttons.append([InlineKeyboardButton("▶️ Активувати" if not active else "⏸ Призупинити",
+                                             callback_data=f"obj_toggle_{obj_id}")])
+        buttons.append([InlineKeyboardButton("🗃 Архівувати", callback_data=f"obj_archive_ask_{obj_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")])
     await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup(buttons))
     return OBJECTS_ACTION
 
@@ -2371,8 +2419,8 @@ async def show_object_report(update, context, obj_id):
     return OBJECTS_ACTION
 
 def obj_back_markup(obj_id):
+    # Внесення звіту — тільки в «📅 Щоденний звіт» головного меню, щоб не дублювати
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Внести звіт за сьогодні", callback_data=f"obj_daily_{obj_id}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ])
 
@@ -2386,6 +2434,53 @@ async def objects_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if data.startswith('obj_detail_'):
         return await show_object_card(update, context, data.replace('obj_detail_', ''))
+
+    if data == 'obj_archive_list':
+        return await show_archive_list(update, context)
+
+    if data.startswith('obj_archive_ask_'):
+        obj_id = data.replace('obj_archive_ask_', '')
+        obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+        if not obj:
+            await show_or_edit(update, "❌ Такого об'єкта немає.", reply_markup=back_markup())
+            return OBJECTS_ACTION
+        await show_or_edit(update,
+            f"🗃 Архівувати «{obj.get('name', '')}»?\n\n"
+            "Об'єкт зникне зі списків і нагадувань. Дані не видаляються: "
+            "відновити можна з «🗃 Архів» або відмінити одразу.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Так, архівувати", callback_data=f"obj_archive_yes_{obj_id}")],
+                [InlineKeyboardButton("❌ Ні, скасувати", callback_data=f"obj_detail_{obj_id}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+            ]))
+        return OBJECTS_ACTION
+
+    if data.startswith('obj_archive_yes_'):
+        obj_id = data.replace('obj_archive_yes_', '')
+        obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+        if not obj:
+            await show_or_edit(update, "❌ Такого об'єкта немає.", reply_markup=back_markup())
+            return OBJECTS_ACTION
+        old = {k: v for k, v in obj.items() if k != 'id'}
+        fb_set('objects', obj_id, {**old, 'status': 'archived', 'archivedFrom': old.get('status') or 'active'})
+        ms = undo_push(update.effective_user.id, f"Об'єкт «{old.get('name', '')}» архівовано",
+                       [{'op': 'restore', 'col': 'objects', 'id': obj_id, 'data': old}])
+        return await show_object_card(update, context, obj_id, undo_ms=ms)
+
+    if data.startswith('obj_restore_'):
+        obj_id = data.replace('obj_restore_', '')
+        obj = next((o for o in get_objects() if o['id'] == obj_id), None)
+        if not obj:
+            await show_or_edit(update, "❌ Такого об'єкта немає.", reply_markup=back_markup())
+            return OBJECTS_ACTION
+        old = {k: v for k, v in obj.items() if k != 'id'}
+        prev = old.get('archivedFrom')
+        restored = {k: v for k, v in old.items() if k != 'archivedFrom'}
+        restored['status'] = prev if prev in ('active', 'paused') else 'active'
+        fb_set('objects', obj_id, restored)
+        ms = undo_push(update.effective_user.id, f"Об'єкт «{old.get('name', '')}» відновлено з архіву",
+                       [{'op': 'restore', 'col': 'objects', 'id': obj_id, 'data': old}])
+        return await show_object_card(update, context, obj_id, undo_ms=ms)
 
     if data.startswith('obj_toggle_'):
         obj_id = data.replace('obj_toggle_', '')
