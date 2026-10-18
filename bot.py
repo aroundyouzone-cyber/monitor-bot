@@ -921,7 +921,7 @@ async def ask_materials_msg(update, context, via_callback=False):
         for m in added:
             text += f"  • {m['name']} — {m['qty']} {m['unit']}"
             if m.get('price'):
-                text += f" × {fmt_money(m['price'])}"
+                text += f" × {fmt_money(m['price'])} = {fmt_money(m['qty']*m['price'])}"
             text += "\n"
 
     buttons = [
@@ -1089,17 +1089,17 @@ async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if daily['workers']:
         text += "👷 *Робітники:*\n"
         for w in daily['workers']:
-            text += f"  • {w['name']} — {w['hrs']}год"
+            text += f"  • {w['name']} — {w['hrs']} год"
             if w.get('rate'):
-                text += f" = {fmt_money(w['hrs']*w['rate'])}"
+                text += f" × {fmt_money(w['rate'])} = {fmt_money(w['hrs']*w['rate'])}"
             text += "\n"
 
     if daily['materials']:
         text += "\n📦 *Матеріали:*\n"
         for m in daily['materials']:
-            text += f"  • {m['name']} {m['qty']} {m['unit']}"
+            text += f"  • {m['name']} — {m['qty']} {m['unit']}"
             if m.get('price'):
-                text += f" = {fmt_money(m['qty']*m['price'])}"
+                text += f" × {fmt_money(m['price'])} = {fmt_money(m['qty']*m['price'])}"
             text += "\n"
 
     if daily['transport']:
@@ -1823,11 +1823,10 @@ def search_back_markup():
     ])
 
 def _stock_lines(items):
-    # Повні назви рядками (в таблиці вони обрізались і не було видно, що це за матеріал)
-    lines = []
-    for i, st in enumerate(items, 1):
-        lines.append(f"{i}. {_h(st.get('name', '—'))} — <b>{_h(st.get('qty', 0))} {_h(st.get('unit', 'шт'))}</b>")
-    return "\n".join(lines)
+    # Таблиця складу; довга назва переноситься на кілька рядків, а не обрізається
+    rows = [(str(i), st.get('name') or '—', f"{_num(st.get('qty', 0))} {st.get('unit') or 'шт'}")
+            for i, st in enumerate(items, 1)]
+    return make_table(["№", "Назва", "Кільк."], rows, [3, 22, 8])
 
 async def show_stock_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nav_push(context, 'stock_list')
@@ -1925,13 +1924,52 @@ def _cell(v, w):
         v = v[:w - 1] + "…"
     return v.ljust(w)
 
+def _num(x):
+    """Число без валюти: 2640 → '2 640', 25.5 → '25.5'."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if x == int(x):
+        return f"{int(x):,}".replace(',', ' ')
+    return f"{x:,.2f}".replace(',', ' ').rstrip('0').rstrip('.')
+
+def _wrap(v, w):
+    """Розбиває текст на рядки завширшки до w (слова цілі, де можна), нічого не обрізає."""
+    lines, cur = [], ''
+    for word in str(v).split():
+        while len(word) > w:
+            if cur:
+                lines.append(cur)
+                cur = ''
+            lines.append(word[:w])
+            word = word[w:]
+        if not cur:
+            cur = word
+        elif len(cur) + 1 + len(word) <= w:
+            cur += ' ' + word
+        else:
+            lines.append(cur)
+            cur = word
+    if cur or not lines:
+        lines.append(cur)
+    return lines
+
 def make_table(headers, rows, widths):
-    """Таблиця з заголовками у моноширинному блоці (Telegram <pre>)."""
+    """Таблиця з заголовками у моноширинному блоці (Telegram <pre>).
+    Довгий текст переноситься на наступні рядки всередині своєї колонки."""
     sep = " | "
-    lines = [sep.join(_cell(h, w) for h, w in zip(headers, widths))]
+
+    def block(cells):
+        wrapped = [_wrap(c, w) for c, w in zip(cells, widths)]
+        n = max(len(x) for x in wrapped)
+        return [sep.join((x[i] if i < len(x) else '').ljust(w) for x, w in zip(wrapped, widths)).rstrip()
+                for i in range(n)]
+
+    lines = block(headers)
     lines.append("-" * (sum(widths) + len(sep) * (len(widths) - 1)))
     for r in rows:
-        lines.append(sep.join(_cell(c, w) for c, w in zip(r, widths)))
+        lines += block(r)
     return "<pre>" + _h("\n".join(lines)) + "</pre>"
 
 # ── ДЕТАЛІ ЗАПИСУ ДЛЯ ЗВІТУ ─────────────────────────────────────
@@ -1962,27 +2000,37 @@ def format_log_details(log):
     workers = log.get('workers') or []
     materials = log.get('materials') or []
     transport = log.get('transport') or []
+    # Кожна таблиця: кількість × ціна за одиницю = сума
     if workers:
-        rows = [(w.get('name', ''), f"{w.get('hrs', 0)} год",
-                 fmt_money((w.get('hrs') or 0) * w['rate']) if w.get('rate') else '—')
-                for w in workers]
-        out += ["", "<b>👷 Робітники</b>", make_table(["Працівник", "Годин", "Сума"], rows, [14, 7, 9])]
+        rows = []
+        for w in workers:
+            hrs, rate = w.get('hrs') or 0, w.get('rate')
+            rows.append((w.get('name', ''),
+                         _num(hrs),
+                         _num(rate) if rate else '—',
+                         _num(hrs * rate) if rate else '—'))
+        out += ["", "<b>👷 Робітники</b>",
+                make_table(["Працівник", "Годин", "Ставка", "Сума"], rows, [11, 6, 6, 6])]
     if materials:
-        rows = [(m.get('name', ''), f"{m.get('qty', '')} {m.get('unit', '')}".strip(),
-                 fmt_money((m.get('qty') or 0) * m['price']) if m.get('price') else '—')
-                for m in materials]
-        out += ["", "<b>📦 Матеріали</b>", make_table(["Матеріал", "К-сть", "Сума"], rows, [14, 7, 9])]
+        rows = []
+        for m in materials:
+            qty, price = m.get('qty'), m.get('price')
+            rows.append((m.get('name', ''),
+                         f"{_num(qty)} {m.get('unit') or ''}".strip() if qty not in (None, '') else '—',
+                         _num(price) if price else '—',
+                         _num((qty or 0) * price) if price else '—'))
+        out += ["", "<b>📦 Матеріали</b>",
+                make_table(["Матеріал", "К-сть", "Ціна/од", "Сума"], rows, [11, 6, 7, 6])]
     if transport:
         rows = []
         for x in transport:
-            qty = x.get('qty')
-            price = x.get('price')
+            qty, price = x.get('qty'), x.get('price')
             rows.append((x.get('name', ''),
-                         f"{qty:g}" if qty else '—',
-                         f"{price:g}" if price else '—',
-                         f"{(x.get('cost') or 0):,.0f}".replace(',', ' ')))
+                         _num(qty) if qty else '—',
+                         _num(price) if price else '—',
+                         _num(x.get('cost') or 0)))
         out += ["", "<b>🚛 Транспорт</b>",
-                make_table(["Транспорт", "К-сть", "Ціна", "Сума"], rows, [12, 5, 5, 7])]
+                make_table(["Транспорт", "К-сть", "Ціна/од", "Сума"], rows, [11, 6, 7, 6])]
     if log.get('desc'):
         out += ["", f"📝 {_h(log['desc'])}"]
     if log.get('photos'):
