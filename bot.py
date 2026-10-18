@@ -446,6 +446,7 @@ def _nav_renderers():
         'obj_card': lambda u, c: show_object_card(u, c, c.user_data.get('cur_obj_id')),
         'report_detail': lambda u, c: show_object_report(u, c, c.user_data.get('cur_obj_id')),
         'plan': start_plan,
+        'reminder': lambda u, c: render_reminder(u, c),
     }
 
 async def back_to_menu(update, context):
@@ -2464,6 +2465,7 @@ async def start_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("➕ Додати нагадування", callback_data="plan_add")],
         [InlineKeyboardButton("📋 Найближчі", callback_data="plan_list")],
+        [InlineKeyboardButton("🔔 Нагадування про звіт", callback_data="rem_menu")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
     ]
     await show_or_edit(update,
@@ -2477,6 +2479,9 @@ async def plan_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    if data.startswith('rem_'):
+        return await reminder_callback(update, context)
 
     if data == 'plan_add':
         nav_push(context, 'plan_date')
@@ -2615,48 +2620,194 @@ def missing_reports(objects, logs, day_iso):
     have = {l.get('objId') for l in logs if str(l.get('date') or '') == day_iso}
     return [o for o in objects if o.get('status') == 'active' and o.get('id') not in have]
 
-def get_reminder_doc():
-    doc = next((x for x in fb_get_all('settings') if x.get('id') == 'reminder'), None)
-    return dict(doc or {})
+# ── НАГАДУВАННЯ ПРО ЗВІТ (персональні: дні, час, відпустка) ──────
+WEEKDAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд']
+ABSENCE_LABELS = {'vac': '🏖 Відпустка', 'sick': '🤒 Лікарняний', 'other': '📝 Інше'}
+REASONS = {'vac': '🏖 Відпустка', 'sick': '🤒 Лікарняний', 'nowork': '🌧 Не було роботи', 'other': '📝 Інше'}
+DEFAULT_EARLY = int(os.environ.get('REMIND_EARLY_HOUR', '17') or 17)
+DEFAULT_LATE = int(os.environ.get('REMIND_HOUR', '18') or 18)
 
-async def _broadcast(bot, text):
-    for uid in ALLOWED_IDS:
-        try:
-            await bot.send_message(chat_id=int(uid), text=text)
-        except Exception as e:
-            logger.error(f"reminder send error: {e}")
+def _prefs_from(doc):
+    return {'weekdays': list(doc.get('weekdays', [0, 1, 2, 3, 4])),
+            'absentType': doc.get('absentType', ''), 'absentUntil': doc.get('absentUntil', ''),
+            'early_h': int(doc.get('early_h', DEFAULT_EARLY)), 'late_h': int(doc.get('late_h', DEFAULT_LATE)),
+            'earlySent': doc.get('earlySent', ''), 'lateSent': doc.get('lateSent', '')}
+
+def get_user_prefs(uid):
+    doc = next((x for x in fb_get_all('reminderPrefs') if str(x.get('id')) == str(uid)), None) or {}
+    return _prefs_from(doc)
+
+def _save_prefs(uid, prefs):
+    fb_set('reminderPrefs', str(uid), dict(prefs))
+
+def is_absent(prefs, day_iso):
+    return bool(prefs.get('absentType')) and str(prefs.get('absentUntil') or '') >= day_iso
+
+def should_remind(prefs, now):
+    return now.weekday() in prefs['weekdays'] and not is_absent(prefs, now.date().isoformat())
+
+def pending_objects(day):
+    # Активні об'єкти без звіту за день, яким ще не пояснено причину
+    explained = {x.get('objId') for x in fb_get_all('noReportReasons') if x.get('date') == day}
+    return [o for o in missing_reports(get_objects(), fb_get_all('dailyLogs'), day) if o.get('id') not in explained]
+
+def _render_text(p, today):
+    days = ", ".join(WEEKDAY_NAMES[i] for i in sorted(p['weekdays'])) or "немає"
+    if p['absentType'] and str(p['absentUntil']) >= today.isoformat():
+        absence = f"Зараз: {ABSENCE_LABELS.get(p['absentType'], '')} до {fmt_date(p['absentUntil'])}"
+    else:
+        absence = "Зараз: на роботі"
+    return ("🔔 Нагадування про звіт\n\n"
+            f"Дні: {days}\n"
+            f"Перше нагадування: {p['early_h']:02d}:00\n"
+            f"Друге нагадування: {p['late_h']:02d}:00\n"
+            f"{absence}\n\n"
+            "Натисніть день, щоб вмикати або вимикати нагадування.")
+
+def _render_kb(p, undo_ms=None):
+    rows = []
+    if undo_ms:
+        rows.append(undo_markup(undo_ms).inline_keyboard[0])
+    for chunk in (range(0, 4), range(4, 7)):
+        rows.append([InlineKeyboardButton(("✅ " if i in p['weekdays'] else "⬜ ") + WEEKDAY_NAMES[i],
+                                          callback_data=f"rem_day_{i}") for i in chunk])
+    rows.append([InlineKeyboardButton(f"⏰ Перше: {p['early_h']:02d}:00", callback_data="rem_tm_e"),
+                 InlineKeyboardButton(f"⏰ Друге: {p['late_h']:02d}:00", callback_data="rem_tm_l")])
+    rows.append([InlineKeyboardButton("🏖 Відпустка", callback_data="rem_abs_vac"),
+                 InlineKeyboardButton("🤒 Лікарняний", callback_data="rem_abs_sick")])
+    rows.append([InlineKeyboardButton("📝 Інше", callback_data="rem_abs_other")])
+    if p['absentType']:
+        rows.append([InlineKeyboardButton("✅ Я вже на роботі", callback_data="rem_clear")])
+    rows.append([InlineKeyboardButton("📝 Пояснити, чому немає звіту", callback_data="why_menu")])
+    rows.append(nav_row())
+    return InlineKeyboardMarkup(rows)
+
+async def render_reminder(update, context, undo_ms=None):
+    p = get_user_prefs(update.effective_user.id)
+    await show_or_edit(update, _render_text(p, kyiv_now().date()), reply_markup=_render_kb(p, undo_ms))
+    return PLAN_MENU
+
+async def show_reminder_settings(update, context):
+    stack = context.user_data.setdefault('nav', [])
+    if not stack or stack[-1] != 'reminder':
+        nav_push(context, 'reminder')
+    return await render_reminder(update, context)
+
+def _change_prefs(uid, new, old, desc):
+    _save_prefs(uid, new)
+    return undo_push(uid, desc, [{'op': 'restore', 'col': 'reminderPrefs', 'id': str(uid), 'data': dict(old)}])
+
+async def reminder_callback(update, context):
+    data = update.callback_query.data
+    uid = update.effective_user.id
+    if data == 'rem_menu':
+        return await show_reminder_settings(update, context)
+    p = get_user_prefs(uid)
+    if data.startswith('rem_day_'):
+        i = int(data[len('rem_day_'):])
+        new = dict(p, weekdays=sorted(set(p['weekdays']) ^ {i}))
+        ms = _change_prefs(uid, new, p, f"Нагадування: дні {', '.join(WEEKDAY_NAMES[d] for d in new['weekdays']) or 'немає'}")
+        return await render_reminder(update, context, undo_ms=ms)
+    if data.startswith('rem_tm_'):
+        kind = data[len('rem_tm_'):]
+        hours = [15, 16, 17, 18] if kind == 'e' else [17, 18, 19, 20]
+        title = "першого" if kind == 'e' else "другого"
+        buttons = [[InlineKeyboardButton(f"{h:02d}:00", callback_data=f"rem_seth_{kind}_{h}") for h in hours]]
+        buttons.append(nav_row("rem_menu"))
+        await show_or_edit(update, f"Оберіть час {title} нагадування:", reply_markup=InlineKeyboardMarkup(buttons))
+        return PLAN_MENU
+    if data.startswith('rem_seth_'):
+        kind, h = data[len('rem_seth_'):].split('_')
+        key = 'early_h' if kind == 'e' else 'late_h'
+        new = dict(p, **{key: int(h)})
+        ms = _change_prefs(uid, new, p, f"Нагадування: {'перше' if kind == 'e' else 'друге'} о {int(h):02d}:00")
+        return await render_reminder(update, context, undo_ms=ms)
+    if data.startswith('rem_abs_'):
+        t = data[len('rem_abs_'):]
+        buttons = [[InlineKeyboardButton(f"{n} дн.", callback_data=f"rem_set_{t}_{n}") for n in (1, 3, 7, 14)]]
+        buttons.append(nav_row("rem_menu"))
+        await show_or_edit(update, f"{ABSENCE_LABELS.get(t, '')}\n\nНа скільки днів, починаючи з сьогодні?",
+                           reply_markup=InlineKeyboardMarkup(buttons))
+        return PLAN_MENU
+    if data.startswith('rem_set_'):
+        t, n = data[len('rem_set_'):].rsplit('_', 1)
+        until = (kyiv_now().date() + timedelta(days=int(n) - 1)).isoformat()
+        new = dict(p, absentType=t, absentUntil=until)
+        ms = _change_prefs(uid, new, p, f"Нагадування: {ABSENCE_LABELS.get(t, '')} до {fmt_date(until)}")
+        return await render_reminder(update, context, undo_ms=ms)
+    if data == 'rem_clear':
+        new = dict(p, absentType='', absentUntil='')
+        ms = _change_prefs(uid, new, p, "Нагадування: знову на роботі")
+        return await render_reminder(update, context, undo_ms=ms)
+    return PLAN_MENU
+
+# ── ПРИЧИНА НЕВНЕСЕННЯ ЗВІТУ (кнопки в нагадуванні) ──────────────
+def why_markup():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📝 Пояснити, чому немає звіту", callback_data="why_menu")]])
+
+async def why_callback(update, context):
+    q = update.callback_query
+    if not is_allowed(update.effective_user.id):
+        await q.answer("Немає доступу", show_alert=True)
+        return
+    await q.answer()
+    uid = update.effective_user.id
+    day = kyiv_now().date().isoformat()
+    data = q.data
+    if data == 'why_menu':
+        left = pending_objects(day)
+        if not left:
+            await q.edit_message_text("✅ Усі звіти за сьогодні внесено або пояснено.")
+            return
+        rows = [[InlineKeyboardButton(o.get('name', '—'), callback_data=f"why_obj_{o['id']}")] for o in left]
+        await q.edit_message_text("Оберіть об'єкт, по якому немає звіту:", reply_markup=InlineKeyboardMarkup(rows))
+        return
+    if data.startswith('why_obj_'):
+        oid = data[len('why_obj_'):]
+        rows = [[InlineKeyboardButton(label, callback_data=f"why_r_{oid}_{code}")] for code, label in REASONS.items()]
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="why_menu")])
+        await q.edit_message_text("Оберіть причину:", reply_markup=InlineKeyboardMarkup(rows))
+        return
+    if data.startswith('why_r_'):
+        oid, code = data[len('why_r_'):].rsplit('_', 1)
+        obj = next((o for o in get_objects() if o.get('id') == oid), None)
+        name = (obj or {}).get('name', '—')
+        doc_id = f"{day}_{oid}"
+        fb_set('noReportReasons', doc_id, {'date': day, 'objId': oid, 'objName': name, 'reason': code,
+                                           'by': update.effective_user.first_name or '', 'ts': now_stamp()})
+        ms = undo_push(uid, f"Причина: {name} — {REASONS.get(code, code)}",
+                       [{'op': 'delete', 'col': 'noReportReasons', 'id': doc_id}])
+        await q.edit_message_text(f"✅ Записано: {name} — {REASONS.get(code, code)}", reply_markup=undo_markup(ms))
+
+# ── НАДСИЛАННЯ НАГАДУВАНЬ ─────────────────────────────────────
+async def _send(bot, uid, text, markup=None):
+    try:
+        await bot.send_message(chat_id=int(uid), text=text, reply_markup=markup)
+    except Exception as e:
+        logger.error(f"reminder send error: {e}")
 
 async def reminder_loop(bot):
-    # 17:00 — нагадати внести звіт (завжди, з переліком тих, хто ще не вніс)
-    # 18:00 — якщо звіт по якомусь об'єкту ще не внесено, нагадати ще раз
-    early_h = int(os.environ.get('REMIND_EARLY_HOUR', '17') or 17)
-    late_h = int(os.environ.get('REMIND_HOUR', '18') or 18)
+    # Кожному користувачу — у його часи (типово 17:00 і 18:00), лише в його робочі дні
+    # і не під час відпустки/лікарняного. Друге нагадування — тільки якщо є незвітовані об'єкти.
     while True:
         try:
             now = kyiv_now()
             day = now.date().isoformat()
-            doc = get_reminder_doc()
-            if reminder_due(now, doc.get('early', ''), early_h):
-                miss = missing_reports(get_objects(), fb_get_all('dailyLogs'), day)
-                if miss:
-                    names = ", ".join(o.get('name', '') for o in miss)
-                    text = (f"⏰ {early_h}:00 — час внести щоденний звіт за {fmt_date(day)}.\n"
-                            f"Ще не внесено: {names}\n"
-                            "Натисніть «📅 Щоденний звіт».")
-                else:
-                    text = f"⏰ {early_h}:00 — звіти за {fmt_date(day)} внесено по всіх об'єктах ✅"
-                await _broadcast(bot, text)
-                doc['early'] = day
-                fb_set('settings', 'reminder', doc)
-            if reminder_due(now, doc.get('last', ''), late_h):
-                miss = missing_reports(get_objects(), fb_get_all('dailyLogs'), day)
-                if miss:
-                    names = ", ".join(o.get('name', '') for o in miss)
-                    text = (f"🔔 {late_h}:00 — за сьогодні ({fmt_date(day)}) ще немає звіту по: {names}.\n"
-                            "Натисніть «📅 Щоденний звіт».")
-                    await _broadcast(bot, text)
-                doc['last'] = day
-                fb_set('settings', 'reminder', doc)
+            docs = {str(x.get('id')): x for x in fb_get_all('reminderPrefs')}
+            for uid in ALLOWED_IDS:
+                p = _prefs_from(docs.get(str(uid), {}))
+                if not should_remind(p, now):
+                    continue
+                if now.hour < p['late_h'] and reminder_due(now, p['earlySent'], p['early_h']):
+                    await _send(bot, uid, f"⏰ Час внести щоденний звіт за {fmt_date(day)}.\nНатисніть «📅 Щоденний звіт».")
+                    p['earlySent'] = day
+                    _save_prefs(uid, p)
+                if reminder_due(now, p['lateSent'], p['late_h']):
+                    if pending_objects(day):
+                        await _send(bot, uid, f"🔔 Звіт за {fmt_date(day)} ще не внесено.\nНатисніть «📅 Щоденний звіт» або вкажіть причину.",
+                                    why_markup())
+                    p['lateSent'] = day
+                    _save_prefs(uid, p)
         except Exception as e:
             logger.error(f"reminder loop error: {e}")
         await asyncio.sleep(600)
@@ -2673,6 +2824,7 @@ def main():
     # Conversation handler
     app.add_handler(CommandHandler('undo', undo_command))
     app.add_handler(CallbackQueryHandler(undo_callback, pattern=r'^undo_\d+$'))
+    app.add_handler(CallbackQueryHandler(why_callback, pattern=r'^why_'), group=-1)
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
