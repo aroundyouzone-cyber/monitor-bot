@@ -1915,6 +1915,8 @@ async def text_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return await new_object_text(update, context)
     if str(context.user_data.get('awaiting', '')).startswith('obj_rename:'):
         return await obj_rename_text(update, context)
+    if str(context.user_data.get('awaiting', '')).startswith('why_text:'):
+        return await why_text_reply(update, context)
     if context.user_data.get('awaiting') == 'stock_search':
         return await stock_search_text(update, context)
     await update.effective_message.reply_text(
@@ -2772,12 +2774,37 @@ async def why_callback(update, context):
         oid, code = data[len('why_r_'):].rsplit('_', 1)
         obj = next((o for o in get_objects() if o.get('id') == oid), None)
         name = (obj or {}).get('name', '—')
+        if code == 'other':
+            # «Інше» — людина пише причину текстом
+            context.user_data['awaiting'] = f'why_text:{oid}'
+            await q.edit_message_text(f"✍️ Напишіть причину, чому немає звіту по «{name}»:")
+            return
         doc_id = f"{day}_{oid}"
         fb_set('noReportReasons', doc_id, {'date': day, 'objId': oid, 'objName': name, 'reason': code,
                                            'by': update.effective_user.first_name or '', 'ts': now_stamp()})
         ms = undo_push(uid, f"Причина: {name} — {REASONS.get(code, code)}",
                        [{'op': 'delete', 'col': 'noReportReasons', 'id': doc_id}])
         await q.edit_message_text(f"✅ Записано: {name} — {REASONS.get(code, code)}", reply_markup=undo_markup(ms))
+
+async def why_text_reply(update, context):
+    text = (update.effective_message.text or '').strip()
+    oid = str(context.user_data.get('awaiting', '')).split(':', 1)[1]
+    obj = next((o for o in get_objects() if o.get('id') == oid), None)
+    name = (obj or {}).get('name', '—')
+    if len(text) < 2:
+        context.user_data['awaiting'] = f'why_text:{oid}'
+        await update.effective_message.reply_text("❌ Напишіть причину текстом, наприклад: немає матеріалів", reply_markup=prompt_markup())
+        return PLAN_MENU
+    context.user_data.pop('awaiting', None)
+    day = kyiv_now().date().isoformat()
+    doc_id = f"{day}_{oid}"
+    fb_set('noReportReasons', doc_id, {'date': day, 'objId': oid, 'objName': name, 'reason': 'other',
+                                       'reasonText': text, 'by': update.effective_user.first_name or '',
+                                       'ts': now_stamp()})
+    ms = undo_push(update.effective_user.id, f"Причина: {name} — {text}",
+                   [{'op': 'delete', 'col': 'noReportReasons', 'id': doc_id}])
+    await update.effective_message.reply_text(f"✅ Записано: {name} — {text}", reply_markup=undo_markup(ms))
+    return PLAN_MENU
 
 # ── НАДСИЛАННЯ НАГАДУВАНЬ ─────────────────────────────────────
 async def _send(bot, uid, text, markup=None):
