@@ -13,9 +13,14 @@ import csv
 import io
 import traceback
 import time
+import asyncio
 import urllib.request
 import urllib.error
-from datetime import datetime, date, timedelta, time as dtime
+from datetime import datetime, date, timedelta, time as dtime, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 from io import BytesIO
 
 from telegram import (
@@ -156,6 +161,32 @@ def fmt_money(n):
 
 def get_objects():
     return fb_get_all('objects')
+
+def catalog_items(kind, limit=12):
+    """Довідник (колекція catalog): найчастіші назви спершу"""
+    items = [c for c in fb_get_all('catalog') if c.get('kind') == kind and c.get('name')]
+    items.sort(key=lambda c: (-(c.get('uses') or 0), c.get('name', '')))
+    return items[:limit]
+
+def catalog_learn(kind, name, unit='', price=0):
+    """Запам'ятати назву: якщо її ще немає — додати, якщо є — оновити одиницю/ціну і лічильник"""
+    name = (name or '').strip()
+    if not name:
+        return
+    all_c = fb_get_all('catalog')
+    ex = next((c for c in all_c if c.get('kind') == kind
+               and (c.get('name') or '').strip().lower() == name.lower()), None)
+    if ex:
+        data = {k: v for k, v in ex.items() if k != 'id'}
+        data['uses'] = (ex.get('uses') or 0) + 1
+        if unit:
+            data['unit'] = unit
+        if price:
+            data['price'] = price
+        fb_set('catalog', ex['id'], data)
+    else:
+        fb_add('catalog', {'kind': kind, 'name': name, 'unit': unit or '',
+                           'price': price or 0, 'uses': 1})
 
 def get_workers():
     return fb_get_all('workers')
@@ -664,6 +695,20 @@ async def hours_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return DAILY_WORKERS
 
+def make_daily_photo_handler(state):
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        daily = context.user_data.get('daily')
+        if not daily or not daily.get('objId'):
+            await update.effective_message.reply_text(
+                "Спочатку почніть звіт: «📅 Щоденний звіт», оберіть об'єкт.", reply_markup=main_keyboard())
+            return MAIN_MENU
+        photos = daily.setdefault('photos', [])
+        photos.append(update.effective_message.photo[-1].file_id)
+        await update.effective_message.reply_text(
+            f"📷 Фото додано ({len(photos)}). Можна додати ще або продовжити звіт.")
+        return state
+    return handler
+
 async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text input during daily log creation"""
     text = update.message.text.strip()
@@ -838,6 +883,7 @@ async def daily_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             tr['price'] = price
             tr['cost'] = tr.get('qty', 0) * price
             context.user_data['daily']['transport'].append(tr)
+            catalog_learn('transport', tr.get('name'), '', price)
             context.user_data.pop('pending_transport', None)
             context.user_data.pop('awaiting', None)
             return await ask_transport(update, context)
@@ -995,8 +1041,28 @@ async def transport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DAILY_DESC
     if data == 'tr_save':
         return await confirm_daily(update, context)
+    if data == 'tr_list':
+        context.user_data.pop('awaiting', None)
+        return await ask_transport(update, context)
+    if data.startswith('trcat_'):
+        cid = data[len('trcat_'):]
+        c = next((x for x in fb_get_all('catalog') if x.get('id') == cid), None)
+        if not c:
+            return await ask_transport(update, context)
+        context.user_data['pending_transport'] = {'name': c['name']}
+        context.user_data['awaiting'] = 'transport_qty'
+        await query.edit_message_text(
+            f"🛣 {c['name']}\n\nВведіть пробіг (км) або мотогодини (наприклад: 120):",
+            reply_markup=prompt_markup())
+        return DAILY_TRANSPORT
     if data == 'tr_add':
-        await query.edit_message_text("🚛 Введіть назву транспорту (наприклад: Газель):", reply_markup=prompt_markup())
+        rows = [[InlineKeyboardButton(f"🚛 {c['name']}", callback_data=f"trcat_{c['id']}")]
+                for c in catalog_items('transport', 8)]
+        text = "🚛 Введіть назву транспорту (наприклад: Газель)."
+        if rows:
+            text += "\n\nАбо оберіть із довідника 👇"
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="tr_list")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
         context.user_data['awaiting'] = 'transport_name'
         return DAILY_TRANSPORT
 
@@ -1012,7 +1078,10 @@ async def confirm_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_all = total_wage + total_mat + total_tr
 
     text = f"📋 *Підтвердіть запис*\n"
-    text += f"📅 {fmt_date(daily['date'])} | {daily.get('objName', '—')}\n\n"
+    text += f"📅 {fmt_date(daily['date'])} | {daily.get('objName', '—')}\n"
+    if daily.get('photos'):
+        text += f"📷 Фото: {len(daily['photos'])}\n"
+    text += "\n"
 
     if daily['workers']:
         text += "👷 *Робітники:*\n"
@@ -1158,7 +1227,12 @@ async def wiz_ask_name(update, context):
             "Або одним рядком з рисками:\n"
             "Кабель ВВГ | 5×16 | 50 м | 56\n"
             "(назва | характеристика | кількість одиниця | ціна)")
-    await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel")]]))
+    rows = [[InlineKeyboardButton(f"📦 {c['name']}", callback_data=f"wizcat_{c['id']}")]
+            for c in catalog_items('material', 8)]
+    if rows:
+        text += "\n\nАбо оберіть із довідника 👇"
+    rows.append([InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel")])
+    await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup(rows))
     return RECEIPT_PHOTO
 
 async def wiz_ask_spec(update, context):
@@ -1212,6 +1286,7 @@ async def wiz_save(update, context):
     item = dict(context.user_data['wiz']['item'])
     item['amount'] = item['qty'] * item['price']
     context.user_data.pop('wiz', None)
+    catalog_learn('material', item.get('name'), item.get('unit', ''), item.get('price', 0))
     receipt = context.user_data.get('receipt') or {'supplier': '', 'items': []}
     items = list(receipt.get('items', [])) + [item]
     receipt['items'] = items
@@ -1244,6 +1319,8 @@ async def wiz_text(update, context):
             await update.effective_message.reply_text("❌ Напишіть число більше 0, наприклад 50")
             return RECEIPT_PHOTO
         it['qty'] = v
+        if it.get('price'):
+            return await wiz_confirm(update, context)
         return await wiz_ask_price(update, context)
     if step == 'price':
         v = _num(t)
@@ -1258,6 +1335,15 @@ async def wiz_callback(update, context):
     query = update.callback_query
     await query.answer()
     data = query.data
+    if data.startswith('wizcat_'):
+        cid = data[len('wizcat_'):]
+        c = next((x for x in fb_get_all('catalog') if x.get('id') == cid), None)
+        if not c:
+            return await wiz_ask_name(update, context)
+        # з довідника назва, одиниця і ціна вже відомі: одразу питаємо кількість
+        context.user_data['wiz'] = {'step': 'qty', 'item': {
+            'name': c['name'], 'unit': c.get('unit') or 'шт', 'price': c.get('price') or 0}}
+        return await wiz_ask_qty(update, context)
     if data == 'wiz_restart':
         return await wiz_ask_name(update, context)
     if data == 'wiz_save':
@@ -1809,6 +1895,8 @@ async def new_object_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Текст, якого бот не чекав: не мовчимо, а пояснюємо що робити
+    if str(context.user_data.get('awaiting', '')).startswith('hedit_'):
+        return await hist_edit_text(update, context)
     if context.user_data.get('awaiting') == 'new_object_name':
         return await new_object_text(update, context)
     if context.user_data.get('awaiting') == 'stock_search':
@@ -1877,20 +1965,56 @@ def format_log_details(log):
                 for m in materials]
         out += ["", "<b>📦 Матеріали</b>", make_table(["Матеріал", "К-сть", "Сума"], rows, [14, 7, 9])]
     if transport:
-        rows = [(x.get('name', ''), fmt_money(x.get('cost', 0))) for x in transport]
-        out += ["", "<b>🚛 Транспорт</b>", make_table(["Транспорт", "Сума"], rows, [18, 9])]
+        rows = []
+        for x in transport:
+            qty = x.get('qty')
+            price = x.get('price')
+            rows.append((x.get('name', ''),
+                         f"{qty:g}" if qty else '—',
+                         f"{price:g}" if price else '—',
+                         f"{(x.get('cost') or 0):,.0f}".replace(',', ' ')))
+        out += ["", "<b>🚛 Транспорт</b>",
+                make_table(["Транспорт", "К-сть", "Ціна", "Сума"], rows, [12, 5, 5, 7])]
     if log.get('desc'):
         out += ["", f"📝 {_h(log['desc'])}"]
+    if log.get('photos'):
+        out += ["", f"📷 Фото: {len(log['photos'])} (натисніть «Показати фото»)"]
     out += ["", f"💰 <b>Разом за запис: {_h(fmt_money(log_total(log)))}</b>"]
+    hist = log.get('history') or []
+    if hist:
+        out += ["", "<b>🕘 Зміни</b>"]
+        for h in hist[-3:]:
+            out.append(f"• {_h(h.get('ts', ''))} — {_h(h.get('by', ''))} змінив {_h(h.get('what', ''))}")
     return "\n".join(out)
 
-def render_object_report(obj_logs):
+PERIOD_LABELS = {'w': 'за тиждень', 'm': 'за місяць', '': 'за весь час'}
+
+def filter_logs_period(logs, kind):
+    t = date.today()
+    if kind == 'w':
+        start = (t - timedelta(days=6)).isoformat()
+    elif kind == 'm':
+        start = t.replace(day=1).isoformat()
+    else:
+        start = ''
+    return [l for l in logs if not start or str(l.get('date') or '') >= start]
+
+def rep_markup(obj_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Тиждень", callback_data=f"rep_w_{obj_id}"),
+         InlineKeyboardButton("📆 Місяць", callback_data=f"rep_m_{obj_id}")],
+        [InlineKeyboardButton("🗂 Весь час", callback_data=f"rep_{obj_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_menu")],
+    ])
+
+def render_object_report(obj_logs, label=''):
     obj_logs = sorted(obj_logs, key=lambda l: str(l.get('date') or ''), reverse=True)
     name = log_obj_name(obj_logs[0])
     grand = sum(log_total(l) for l in obj_logs)
     rows = [(fmt_date(l.get('date')), l.get('submittedBy') or 'не вказано', fmt_money(log_total(l)))
             for l in obj_logs[:15]]
-    parts = [f"<b>📊 Звіт по об'єкту: {_h(name)}</b>",
+    title = f"<b>📊 Звіт по об'єкту: {_h(name)}</b>" + (f" <i>({_h(label)})</i>" if label else "")
+    parts = [title,
              f"Записів: {len(obj_logs)} | Разом: <b>{_h(fmt_money(grand))}</b>",
              "", make_table(["Дата", "Подав", "Сума"], rows, [10, 10, 9])]
     if len(obj_logs) > 15:
@@ -1921,13 +2045,96 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return HISTORY_LIST
 
+def parse_date_ddmmyyyy(t):
+    try:
+        parts = t.replace('/', '.').replace('-', '.').split('.')
+        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+        return date(y, m, d).isoformat()
+    except Exception:
+        return None
+
+def log_card_markup(log_id, extra_rows=None, has_photos=False):
+    rows = list(extra_rows or [])
+    if has_photos:
+        rows.append([InlineKeyboardButton("📷 Показати фото", callback_data=f"hphoto_{log_id}")])
+    rows += [
+        [InlineKeyboardButton("✏️ Змінити опис", callback_data=f"hedit_desc_{log_id}"),
+         InlineKeyboardButton("📅 Змінити дату", callback_data=f"hedit_date_{log_id}")],
+        [InlineKeyboardButton("🗑 Видалити запис", callback_data=f"hdel_{log_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="hist_back")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def now_stamp():
+    return datetime.now(kyiv_tz()).strftime('%d.%m %H:%M')
+
+def kyiv_tz():
+    try:
+        return ZoneInfo('Europe/Kyiv') if ZoneInfo else timezone(timedelta(hours=3))
+    except Exception:
+        return timezone(timedelta(hours=3))
+
+def _log_without_id(log):
+    return {k: v for k, v in log.items() if k != 'id'}
+
+async def hist_edit_text(update, context):
+    """Текст для зміни опису або дати запису (стан awaiting = hedit_<поле>:<id>)"""
+    aw = context.user_data.get('awaiting', '')
+    kind, log_id = aw.split(':', 1)
+    kind = kind.replace('hedit_', '')
+    text = (update.effective_message.text or '').strip()
+    if kind == 'desc':
+        if not text:
+            await update.effective_message.reply_text("❌ Напишіть опис роботи текстом.", reply_markup=prompt_markup())
+            return HISTORY_LIST
+        changes = {'desc': text}
+    else:
+        iso = parse_date_ddmmyyyy(text)
+        if not iso:
+            await update.effective_message.reply_text(
+                "❌ Невірна дата. Напишіть так: 17.10.2026", reply_markup=prompt_markup())
+            return HISTORY_LIST
+        changes = {'date': iso}
+    logs = fb_get_all('dailyLogs')
+    old = next((l for l in logs if l['id'] == log_id), None)
+    if not old:
+        context.user_data.pop('awaiting', None)
+        await update.effective_message.reply_text("❌ Запис не знайдено.", reply_markup=main_keyboard())
+        return MAIN_MENU
+    old_wo = _log_without_id(old)
+    new = dict(old_wo)
+    new.update(changes)
+    new['history'] = list(old_wo.get('history') or []) + [{
+        'ts': now_stamp(),
+        'by': update.effective_user.first_name or 'Невідомо',
+        'what': 'опис' if kind == 'desc' else 'дату',
+    }]
+    if not fb_set('dailyLogs', log_id, new):
+        await update.effective_message.reply_text("❌ Не вдалося зберегти зміну. Спробуйте ще раз.")
+        return HISTORY_LIST
+    context.user_data.pop('awaiting', None)
+    ms = undo_push(update.effective_user.id,
+                   f"Змінено запис {fmt_date(new.get('date'))} · {log_obj_name(new)}",
+                   [{'op': 'restore', 'col': 'dailyLogs', 'id': log_id, 'data': old_wo}])
+    undo_rows = undo_markup(ms).inline_keyboard if ms else []
+    markup = log_card_markup(log_id, extra_rows=undo_rows)
+    await update.effective_message.reply_text("✅ Зміну збережено.\n\n" + format_log_details(new),
+                                              parse_mode='HTML', reply_markup=log_card_markup(log_id, extra_rows=undo_rows, has_photos=bool(new.get('photos'))))
+    return HISTORY_LIST
+
 async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
     if data.startswith('rep_'):
-        obj_id = data.replace('rep_', '')
+        rest = data[len('rep_'):]
+        kind = ''
+        if rest.startswith('w_'):
+            kind, rest = 'w', rest[2:]
+        elif rest.startswith('m_'):
+            kind, rest = 'm', rest[2:]
+        obj_id = rest
         logs = fb_get_all('dailyLogs')
         obj_logs = [l for l in logs if l.get('objId') == obj_id]
 
@@ -1935,25 +2142,89 @@ async def history_detail_callback(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("❌ Записів немає", reply_markup=back_markup())
             return HISTORY_LIST
 
-        text = render_object_report(obj_logs)
-
+        label = PERIOD_LABELS[kind]
+        sel = filter_logs_period(obj_logs, kind)
         nav_push(context, 'report_detail')
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=back_markup())
+        if not sel:
+            await query.edit_message_text(f"ℹ️ {label[0].upper() + label[1:]} записів немає.", reply_markup=rep_markup(obj_id))
+            return HISTORY_LIST
+        text = render_object_report(sel, label)
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=rep_markup(obj_id))
+        return HISTORY_LIST
+
+    if data == 'hist_back':
+        context.user_data.pop('awaiting', None)
+        return await show_history(update, context, via_callback=True)
+
+    if data.startswith('hphoto_'):
+        log_id = data[len('hphoto_'):]
+        log = next((l for l in fb_get_all('dailyLogs') if l['id'] == log_id), None)
+        photos = (log or {}).get('photos') or []
+        if not photos:
+            await query.message.reply_text("📷 Фото до цього запису немає.")
+            return HISTORY_LIST
+        for fid in photos[:10]:
+            try:
+                await context.bot.send_photo(chat_id=query.message.chat_id, photo=fid)
+            except Exception as e:
+                logger.error(f"send_photo error: {e}")
+        return HISTORY_LIST
+
+    if data.startswith('hedit_desc_') or data.startswith('hedit_date_'):
+        kind = 'desc' if data.startswith('hedit_desc_') else 'date'
+        log_id = data.split('_', 2)[2]
+        context.user_data['awaiting'] = f"hedit_{kind}:{log_id}"
+        text = ("✍️ Напишіть новий опис роботи:" if kind == 'desc'
+                else "📅 Напишіть нову дату у форматі ДД.ММ.РРРР, наприклад 17.10.2026")
+        await show_or_edit(update, text, reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"hist_{log_id}"),
+            InlineKeyboardButton("❌ Скасувати", callback_data="flow_cancel"),
+        ]]))
+        return HISTORY_LIST
+
+    if data.startswith('hdel_') and not data.startswith('hdelok_'):
+        log_id = data[len('hdel_'):]
+        log = next((l for l in fb_get_all('dailyLogs') if l['id'] == log_id), None)
+        if not log:
+            await show_or_edit(update, "❌ Запис не знайдено.", reply_markup=back_markup())
+            return HISTORY_LIST
+        await show_or_edit(update,
+            f"🗑 Видалити запис?\n📅 {fmt_date(log.get('date'))} · {log_obj_name(log)}\n\n"
+            "Після видалення можна відмінити кнопкою.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Так, видалити", callback_data=f"hdelok_{log_id}")],
+                [InlineKeyboardButton("⬅️ Ні, назад", callback_data=f"hist_{log_id}")],
+            ]))
+        return HISTORY_LIST
+
+    if data.startswith('hdelok_'):
+        log_id = data[len('hdelok_'):]
+        log = next((l for l in fb_get_all('dailyLogs') if l['id'] == log_id), None)
+        if not log:
+            await query.edit_message_text("❌ Запис уже не існує.")
+            return HISTORY_LIST
+        old_wo = _log_without_id(log)
+        fb_delete('dailyLogs', log_id)
+        ms = undo_push(update.effective_user.id,
+                       f"Видалено запис {fmt_date(log.get('date'))} · {log_obj_name(log)}",
+                       [{'op': 'restore', 'col': 'dailyLogs', 'id': log_id, 'data': old_wo}])
+        await query.edit_message_text("🗑 Запис видалено.", reply_markup=undo_markup(ms))
         return HISTORY_LIST
 
     if data.startswith('hist_'):
         log_id = data.replace('hist_', '')
+        context.user_data.pop('awaiting', None)
         logs = fb_get_all('dailyLogs')
         log = next((l for l in logs if l['id'] == log_id), None)
 
         if log:
             nav_push(context, 'history_detail')
-            await query.edit_message_text(format_log_details(log), parse_mode='HTML', reply_markup=back_markup())
+            await query.edit_message_text(format_log_details(log), parse_mode='HTML',
+                                          reply_markup=log_card_markup(log_id, has_photos=bool(log.get('photos'))))
+        else:
+            await query.edit_message_text("❌ Запис не знайдено.", reply_markup=back_markup())
 
         return HISTORY_LIST
-
-    if query.data == 'hist_back':
-        return await show_history(update, context, via_callback=True)
 
     return HISTORY_LIST
 
@@ -2209,8 +2480,48 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(text, parse_mode='Markdown')
 
 # ── ОСНОВНИЙ ЦИКЛ ─────────────────────────────────────────────
+def kyiv_now():
+    return datetime.now(kyiv_tz())
+
+def reminder_due(now, last_sent_day, hour):
+    return now.hour >= hour and last_sent_day != now.date().isoformat()
+
+def missing_reports(objects, logs, day_iso):
+    have = {l.get('objId') for l in logs if str(l.get('date') or '') == day_iso}
+    return [o for o in objects if o.get('status') == 'active' and o.get('id') not in have]
+
+def get_reminder_last():
+    doc = next((x for x in fb_get_all('settings') if x.get('id') == 'reminder'), None)
+    return (doc or {}).get('last', '')
+
+async def reminder_loop(bot):
+    hour = int(os.environ.get('REMIND_HOUR', '18') or 18)
+    while True:
+        try:
+            now = kyiv_now()
+            if reminder_due(now, get_reminder_last(), hour):
+                day = now.date().isoformat()
+                miss = missing_reports(get_objects(), fb_get_all('dailyLogs'), day)
+                if miss:
+                    names = ", ".join(o.get('name', '') for o in miss)
+                    text = (f"🔔 За сьогодні ({fmt_date(day)}) ще немає звіту по: {names}.\n"
+                            "Натисніть «📅 Щоденний звіт».")
+                    for uid in ALLOWED_IDS:
+                        try:
+                            await bot.send_message(chat_id=int(uid), text=text)
+                        except Exception as e:
+                            logger.error(f"reminder send error: {e}")
+                fb_set('settings', 'reminder', {'last': day})
+        except Exception as e:
+            logger.error(f"reminder loop error: {e}")
+        await asyncio.sleep(600)
+
+async def _post_init(app):
+    if os.environ.get('REMIND_ENABLED', '1') != '0':
+        asyncio.create_task(reminder_loop(app.bot))
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
     init_firebase()
     _patch_markdown_safety_net()
 
@@ -2243,9 +2554,13 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
             DAILY_DESC: [
+                MessageHandler(filters.PHOTO, make_daily_photo_handler(DAILY_DESC)),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, daily_text_handler)
             ],
-            DAILY_CONFIRM: [CallbackQueryHandler(daily_confirm_callback)],
+            DAILY_CONFIRM: [
+                CallbackQueryHandler(daily_confirm_callback),
+                MessageHandler(filters.PHOTO, make_daily_photo_handler(DAILY_CONFIRM)),
+            ],
             RECEIPT_PHOTO: [
                 CallbackQueryHandler(wiz_callback, pattern=r'^wiz_'),
                 CallbackQueryHandler(receipt_target_callback),
